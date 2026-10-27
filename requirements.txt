@@ -1,0 +1,7 @@
+streamlit
+rdkit
+pubchempy
+langchain-google-genai
+langchain-core
+imageio
+pillow
