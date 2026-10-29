@@ -141,6 +141,7 @@ with st.sidebar:
         "Select Gemini Model", 
         ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"],
         help="gemini-3.8-flash is recommended for general workflows and multi-pathway generation."
+    )
     st.markdown("---")
     st.markdown("Designed for Pharmaceutical Chemists & Computational Retrosynthesis.")
 
