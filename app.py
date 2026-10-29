@@ -137,7 +137,7 @@ with st.sidebar:
         
     st.markdown("---")
     st.header("⚙️ Configuration")
-    selected_model = st.selectbox("Select Gemini Model", ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"])
+    selected_model = st.selectbox("Select Gemini Model", ["gemini-3.8-flash", "Gemini 3.8 Live Extended Thinking", "Antigravity"])
     st.markdown("---")
     st.markdown("Designed for Pharmaceutical Chemists & Computational Retrosynthesis.")
 
