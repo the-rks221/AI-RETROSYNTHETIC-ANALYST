@@ -280,7 +280,7 @@ def get_multi_pathway_retrosynthesis(molecule_name, smiles, model_name):
 # Main UI Execution
 col1, col2 = st.columns([3, 1])
 with col1:
-    target_input = st.text_input("Enter Target Organic Molecule:", value="Paracetamol", placeholder="e.g., Ibuprofen, Aspirin, Caffeine")
+    target_input = st.text_input("Enter Target Organic Molecule:", placeholder="e.g., Paracetamol, Ibuprofen, Aspirin, Caffeine")
 with col2:
     st.write(" ")
     st.write(" ")
