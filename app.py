@@ -5,6 +5,8 @@ from rdkit.Chem import Draw
 import os
 import json
 import re
+import sqlite3
+import hashlib
 from PIL import Image
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -39,71 +41,138 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 class='main-title'>🧪 AI Retrosynthetic Analyst Web Dashboard</h1>", unsafe_allow_html=True)
+# ------------------------------------------------------------------------------
+# 2. SQLITE DATABASE SETUP FOR USER AUTHENTICATION
+# ------------------------------------------------------------------------------
+def init_db():
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
+    conn.commit()
+    conn.close()
+
+def make_hash(password):
+    return hashlib.sha256(str.encode(password)).hexdigest()
+
+def check_user(username, password):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('SELECT password FROM users WHERE username = ?', (username,))
+    data = c.fetchone()
+    conn.close()
+    if data and data[0] == make_hash(password):
+        return True
+    return False
+
+def add_user(username, password):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    try:
+        c.execute('INSERT INTO users(username, password) VALUES (?, ?)', (username, make_hash(password)))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+init_db()
+
+# Session State Initialization for Login
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+if 'username' not in st.session_state:
+    st.session_state['username'] = ""
 
 # ------------------------------------------------------------------------------
-# 2. SIDEBAR CONFIGURATION (SECURE API KEY INPUT)
+# 3. AUTHENTICATION SCREEN (LOGIN / SIGN UP)
 # ------------------------------------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    # Secure password field: hidden on screen and stored safely in session state
-    api_key_input = st.text_input("Enter your Gemini API Key", type="password", help="Get your free key from Google AI Studio")
-    if api_key_input:
-        os.environ["GOOGLE_API_KEY"] = api_key_input
+if not st.session_state['logged_in']:
+    st.markdown("<h1 class='main-title'>🔐 AI Retrosynthetic Analyst Portal</h1>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        tab_login, tab_signup = st.tabs(["🔑 Login", "📝 Sign Up"])
         
-    selected_model = st.selectbox("Select Gemini Model", ["gemini-3.8-flash", "gemini-1.5-pro", "gemini-2.0-flash"])
+        with tab_login:
+            st.subheader("Welcome Back!")
+            login_user = st.text_input("Username", key="login_user")
+            login_pass = st.text_input("Password", type="password", key="login_pass")
+            if st.button("Login"):
+                if check_user(login_user, login_pass):
+                    st.session_state['logged_in'] = True
+                    st.session_state['username'] = login_user
+                    st.success("Login successful! Loading dashboard...")
+                    st.rerun()
+                else:
+                
+                    st.error("Invalid username or password.")
+                    
+        with tab_signup:
+            st.subheader("Create a New Account")
+            new_user = st.text_input("Choose Username", key="signup_user")
+            new_pass = st.text_input("Choose Password", type="password", key="signup_pass")
+            if st.button("Register"):
+                if new_user.strip() and new_pass.strip():
+                    if add_user(new_user, new_pass):
+                        st.success("Account created successfully! Please switch to the Login tab.")
+                    else:
+                        st.error("Username already exists. Choose another.")
+                else:
+                    st.warning("Please fill in all fields.")
+    st.stop()  # Stop execution here until user logs in
+
+# ------------------------------------------------------------------------------
+# 4. MAIN APPLICATION (AUTHENTICATED USERS ONLY)
+# ------------------------------------------------------------------------------
+st.markdown("<h1 class='main-title'>🧪 AI Retrosynthetic Analyst Web Dashboard</h1>", unsafe_allow_html=True)
+
+# Sidebar with User Info & Logout
+with st.sidebar:
+    st.write(f"👤 Logged in as: **{st.session_state['username']}**")
+    if st.button("🚪 Logout"):
+        st.session_state['logged_in'] = False
+        st.session_state['username'] = ""
+        st.rerun()
+        
+    st.markdown("---")
+    st.header("⚙️ Configuration")
+    selected_model = st.selectbox("Select Gemini Model", ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"])
     st.markdown("---")
     st.markdown("Designed for Pharmaceutical Chemists & Computational Retrosynthesis.")
 
-# ------------------------------------------------------------------------------
-# 3. HELPER FUNCTIONS (AUDITED & SECURE)
-# ------------------------------------------------------------------------------
+# Retrieve Shared API Key Securely from Streamlit Secrets or Environment Variables
+try:
+    if "GOOGLE_API_KEY" in st.secrets:
+        os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
+except Exception:
+    pass
+
+# Helper Functions
 def generate_disconnection_gif(target_smiles, synthon_smiles, output_gif_path):
-    """Generates an animated GIF showing the disconnection cut into synthons safely using RDKit and Pillow."""
     try:
         target_mol = Chem.MolFromSmiles(target_smiles)
         synthon_mol = Chem.MolFromSmiles(synthon_smiles)
-        
         if not target_mol or not synthon_mol:
             return None
             
         frames = []
-        
-        # Frame 1: Target Molecule
         img_target = Draw.MolToImage(target_mol, size=(350, 350))
-        for _ in range(4): 
-            frames.append(img_target)
+        for _ in range(4): frames.append(img_target)
         
-        # Frame 2: Reaction Cut Highlight
-        img_highlight = Draw.MolToImage(
-            target_mol, 
-            size=(350, 350), 
-            highlightAtoms=range(target_mol.GetNumAtoms()),
-            highlightColor=(1, 0.4, 0.4)
-        )
-        for _ in range(2): 
-            frames.append(img_highlight)
+        img_highlight = Draw.MolToImage(target_mol, size=(350, 350), highlightAtoms=range(target_mol.GetNumAtoms()), highlightColor=(1, 0.4, 0.4))
+        for _ in range(2): frames.append(img_highlight)
         
-        # Frame 3: Cleaved Synthons
         img_synthons = Draw.MolToImage(synthon_mol, size=(350, 350))
-        for _ in range(5): 
-            frames.append(img_synthons)
+        for _ in range(5): frames.append(img_synthons)
         
-        # Save as GIF
-        frames[0].save(
-            output_gif_path, 
-            save_all=True, 
-            append_images=frames[1:], 
-            duration=500, 
-            loop=0
-        )
+        frames[0].save(output_gif_path, save_all=True, append_images=frames[1:], duration=500, loop=0)
         return output_gif_path
     except Exception as e:
         st.error(f"Error rendering animation: {e}")
         return None
 
 def extract_text_and_json(raw_response):
-    """Safely parses markdown report text and extracts JSON payload."""
     if isinstance(raw_response, list):
         parts = [block['text'] if isinstance(block, dict) and 'text' in block else str(block) for block in raw_response]
         text_result = "\n".join(parts)
@@ -119,9 +188,8 @@ def extract_text_and_json(raw_response):
     return text_result, json_str
 
 def get_multi_pathway_retrosynthesis(molecule_name, smiles, model_name):
-    """Executes Gemini reasoning engine across 3 distinct retrosynthetic routes securely."""
     if not os.environ.get("GOOGLE_API_KEY"):
-        raise ValueError("API Key is missing. Please enter it in the sidebar.")
+        raise ValueError("Server API Key is not configured in Streamlit Secrets.")
         
     llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.2)
 
@@ -205,9 +273,7 @@ def get_multi_pathway_retrosynthesis(molecule_name, smiles, model_name):
     raw_result = chain.invoke({"molecule": molecule_name, "smiles": smiles})
     return extract_text_and_json(raw_result)
 
-# ------------------------------------------------------------------------------
-# 4. MAIN USER INTERFACE & EXECUTION FLOW
-# ------------------------------------------------------------------------------
+# Main UI Execution
 col1, col2 = st.columns([3, 1])
 with col1:
     target_input = st.text_input("Enter Target Organic Molecule:", value="Paracetamol", placeholder="e.g., Ibuprofen, Aspirin, Caffeine")
@@ -218,7 +284,7 @@ with col2:
 
 if analyze_btn:
     if not os.environ.get("GOOGLE_API_KEY"):
-        st.warning("⚠️ Please enter your Gemini API Key in the left sidebar to proceed.")
+        st.error("⚠️ Server API Key is missing. Please configure it in Streamlit Cloud Secrets.")
     else:
         with st.spinner(f"🔍 Searching PubChem and generating structural models for '{target_input}'..."):
             try:
@@ -232,21 +298,17 @@ if analyze_btn:
                     st.subheader(f"Molecule Identified: {target.iupac_name}")
                     st.code(f"SMILES: {smiles}")
 
-                    # 2D Target Rendering
                     mol = Chem.MolFromSmiles(smiles)
                     if mol:
                         img = Draw.MolToImage(mol, size=(300, 300))
                         st.image(img, caption="Target 2D Structure", width=250)
 
-                    # LLM Generation
                     with st.spinner("⚙️ Gemini is evaluating 3 retrosynthetic pathways and calculating disconnections..."):
                         report_text, json_str = get_multi_pathway_retrosynthesis(target_input, smiles, selected_model)
 
-                    # Display Report Text
                     st.markdown("---")
                     st.markdown(report_text)
 
-                    # Render Disconnection Animations
                     st.markdown("---")
                     st.header("🎬 Animated Disconnection Simulations")
                     
@@ -271,7 +333,6 @@ if analyze_btn:
                     except Exception as json_err:
                         st.warning(f"Could not render animations for step disconnections: {json_err}")
 
-                    # Download Report Option
                     st.markdown("---")
                     safe_name = "".join([c for c in target_input if c.isalnum() or c==' ']).strip().replace(' ', '_')
                     st.download_button(
