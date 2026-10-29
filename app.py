@@ -47,7 +47,7 @@ st.markdown("<h1 class='main-title'>🧪 AI Retrosynthetic Analyst Web Dashboard
 with st.sidebar:
     st.header("⚙️ Configuration")
     # Secure password field: hidden on screen and stored safely in session state
-    api_key_input = st.text_input("Enter your Gemini API Key", value=os.environ["GOOGLE_API_KEY"], type="password", help="Get your free key from Google AI Studio")
+    api_key_input = st.text_input("Enter your Gemini API Key", value="os.environ["GOOGLE_API_KEY"]", type="password", help="Get your free key from Google AI Studio")
     if api_key_input:
         os.environ["GOOGLE_API_KEY"] = api_key_input
         
