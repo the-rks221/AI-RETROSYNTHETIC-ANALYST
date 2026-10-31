@@ -14,8 +14,11 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 # ------------------------------------------------------------------------------
-# 1. PAGE CONFIGURATION & SECURE SETUP
+# 1. CONFIGURATION & ADMIN SETUP
 # ------------------------------------------------------------------------------
+# ⚠️ CHANGE THIS TO YOUR EXACT SIGNUP USERNAME TO MAKE YOURSELF THE SOLE ADMIN
+ADMIN_USERNAME = "admin" 
+
 st.set_page_config(
     page_title="AI Retrosynthetic Analyst",
     page_icon="🧪",
@@ -78,7 +81,7 @@ def add_user(username, password):
 
 init_db()
 
-# Session State Initialization for Login
+# Session State Initialization
 if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 if 'username' not in st.session_state:
@@ -105,7 +108,6 @@ if not st.session_state['logged_in']:
                     st.success("Login successful! Loading dashboard...")
                     st.rerun()
                 else:
-                
                     st.error("Invalid username or password.")
                     
         with tab_signup:
@@ -120,16 +122,20 @@ if not st.session_state['logged_in']:
                         st.error("Username already exists. Choose another.")
                 else:
                     st.warning("Please fill in all fields.")
-    st.stop()  # Stop execution here until user logs in
+    st.stop()  # Stop execution until user logs in
 
 # ------------------------------------------------------------------------------
-# 4. MAIN APPLICATION (AUTHENTICATED USERS ONLY)
+# 4. MAIN APPLICATION (AUTHENTICATED USERS)
 # ------------------------------------------------------------------------------
 st.markdown("<h1 class='main-title'>🧪 AI Retrosynthetic Analyst Web Dashboard</h1>", unsafe_allow_html=True)
 
-# Sidebar with User Info & Logout
 with st.sidebar:
     st.write(f"👤 Logged in as: **{st.session_state['username']}**")
+    if st.session_state['username'] == ADMIN_USERNAME:
+        st.markdown("🛡️ **Role:** `Administrator`")
+    else:
+        st.markdown("🧪 **Role:** `Standard User`")
+        
     if st.button("🚪 Logout"):
         st.session_state['logged_in'] = False
         st.session_state['username'] = ""
@@ -140,12 +146,33 @@ with st.sidebar:
     selected_model = st.selectbox(
         "Select Gemini Model", 
         ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"],
-        help="gemini-3.8-flash is recommended for general workflows and multi-pathway generation."
+        help="gemini-3.8-flash is optimized for chemical synthesis tasks."
     )
+
+    # 🔒 RESTRICTED ADMIN PANEL: Only visible if the logged-in user matches ADMIN_USERNAME
+    if st.session_state['username'] == ADMIN_USERNAME:
+        st.markdown("---")
+        with st.expander("📊 Admin Panel: User Database"):
+            try:
+                conn = sqlite3.connect('users.db')
+                c = conn.cursor()
+                c.execute("SELECT username FROM users")
+                registered_users = c.fetchall()
+                conn.close()
+                
+                if registered_users:
+                    st.write(f"Total Accounts: {len(registered_users)}")
+                    for idx, user in enumerate(registered_users, 1):
+                        st.text(f"{idx}. {user[0]}")
+                else:
+                    st.info("No users registered yet.")
+            except Exception as db_err:
+                st.error(f"Could not load user DB: {db_err}")
+
     st.markdown("---")
     st.markdown("Designed for Pharmaceutical Chemists & Computational Retrosynthesis.")
 
-# Retrieve Shared API Key Securely from Streamlit Secrets or Environment Variables
+# Load API Key securely from Streamlit Secrets
 try:
     if "GOOGLE_API_KEY" in st.secrets:
         os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
@@ -193,7 +220,7 @@ def extract_text_and_json(raw_response):
 
 def get_multi_pathway_retrosynthesis(molecule_name, smiles, model_name):
     if not os.environ.get("GOOGLE_API_KEY"):
-        raise ValueError("Server API Key is not configured in Streamlit Secrets.")
+        raise ValueError("Server API Key is not configured in Streamlit Cloud Secrets.")
         
     llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.2)
 
@@ -277,10 +304,10 @@ def get_multi_pathway_retrosynthesis(molecule_name, smiles, model_name):
     raw_result = chain.invoke({"molecule": molecule_name, "smiles": smiles})
     return extract_text_and_json(raw_result)
 
-# Main UI Execution
+# Main UI Layout
 col1, col2 = st.columns([3, 1])
 with col1:
-    target_input = st.text_input("Enter Target Organic Molecule:", placeholder="e.g., Paracetamol, Ibuprofen, Aspirin, Caffeine")
+    target_input = st.text_input("Enter Target Organic Molecule:", value="Paracetamol", placeholder="e.g., Ibuprofen, Aspirin, Caffeine")
 with col2:
     st.write(" ")
     st.write(" ")
