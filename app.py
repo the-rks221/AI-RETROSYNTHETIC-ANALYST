@@ -19,7 +19,7 @@ from langchain_core.output_parsers import StrOutputParser
 ADMIN_USERNAME = "admin"  # Change this to your desired admin username
 
 # Absolute path guarantee so users.db is always saved right next to app.py
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.db')
+DB_PATH = /workspaces/AI-RETROSYNTHETIC-ANALYST/users.db
 
 st.set_page_config(
     page_title="AI Retrosynthetic Analyst",
