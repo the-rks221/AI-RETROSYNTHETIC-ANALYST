@@ -151,25 +151,33 @@ with st.sidebar:
         help="gemini-3.8-flash is optimized for chemical synthesis tasks."
     )
 
-    # 🔒 RESTRICTED ADMIN PANEL
+    # 🔒 RESTRICTED ADMIN PANEL WITH LIVE DEBUGGING
     if st.session_state['username'] == ADMIN_USERNAME:
         st.markdown("---")
         with st.expander("📊 Admin Panel: User Database"):
+            st.write(f"📁 **DB Path:** `{DB_PATH}`")
             try:
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
-                c.execute("SELECT username FROM users")
-                registered_users = c.fetchall()
-                conn.close()
+                # Check if table exists first
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';")
+                table_exists = c.fetchone()
                 
-                if registered_users:
-                    st.write(f"Total Accounts: {len(registered_users)}")
-                    for idx, user in enumerate(registered_users, 1):
-                        st.text(f"{idx}. {user[0]}")
+                if not table_exists:
+                    st.warning("⚠️ 'users' table does not exist yet.")
                 else:
-                    st.info("No users registered yet.")
+                    c.execute("SELECT username FROM users")
+                    registered_users = c.fetchall()
+                    
+                    if registered_users:
+                        st.success(f"Total Accounts: {len(registered_users)}")
+                        for idx, user in enumerate(registered_users, 1):
+                            st.text(f"{idx}. {user[0]}")
+                    else:
+                        st.info("Table exists, but 0 users are registered yet.")
+                conn.close()
             except Exception as db_err:
-                st.error(f"Could not load user DB: {db_err}")
+                st.error(f"Database error: {db_err}")
 
     st.markdown("---")
     st.markdown("Designed for Pharmaceutical Chemists & Computational Retrosynthesis.")
