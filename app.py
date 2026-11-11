@@ -16,8 +16,10 @@ from langchain_core.output_parsers import StrOutputParser
 # ------------------------------------------------------------------------------
 # 1. CONFIGURATION & ADMIN SETUP
 # ------------------------------------------------------------------------------
-# ⚠️ CHANGE THIS TO YOUR EXACT SIGNUP USERNAME TO MAKE YOURSELF THE SOLE ADMIN
-ADMIN_USERNAME = "admin" 
+ADMIN_USERNAME = "admin"  # Change this to your desired admin username
+
+# Absolute path guarantee so users.db is always saved right next to app.py
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.db')
 
 st.set_page_config(
     page_title="AI Retrosynthetic Analyst",
@@ -48,7 +50,7 @@ st.markdown("""
 # 2. SQLITE DATABASE SETUP FOR USER AUTHENTICATION
 # ------------------------------------------------------------------------------
 def init_db():
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
     conn.commit()
@@ -58,7 +60,7 @@ def make_hash(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 def check_user(username, password):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('SELECT password FROM users WHERE username = ?', (username,))
     data = c.fetchone()
@@ -68,7 +70,7 @@ def check_user(username, password):
     return False
 
 def add_user(username, password):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
         c.execute('INSERT INTO users(username, password) VALUES (?, ?)', (username, make_hash(password)))
@@ -149,12 +151,12 @@ with st.sidebar:
         help="gemini-3.8-flash is optimized for chemical synthesis tasks."
     )
 
-    # 🔒 RESTRICTED ADMIN PANEL: Only visible if the logged-in user matches ADMIN_USERNAME
+    # 🔒 RESTRICTED ADMIN PANEL
     if st.session_state['username'] == ADMIN_USERNAME:
         st.markdown("---")
         with st.expander("📊 Admin Panel: User Database"):
             try:
-                conn = sqlite3.connect('users.db')
+                conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 c.execute("SELECT username FROM users")
                 registered_users = c.fetchall()
@@ -220,7 +222,7 @@ def extract_text_and_json(raw_response):
 
 def get_multi_pathway_retrosynthesis(molecule_name, smiles, model_name):
     if not os.environ.get("GOOGLE_API_KEY"):
-        raise ValueError("Server API Key is not configured in Streamlit Cloud Secrets.")
+        raise ValueError("Server API Key is not configured in Streamlit Secrets.")
         
     llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.2)
 
