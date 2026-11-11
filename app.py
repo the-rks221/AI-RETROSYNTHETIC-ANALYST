@@ -5,10 +5,10 @@ from rdkit.Chem import Draw
 import os
 import json
 import re
-import sqlite3
 import hashlib
 from PIL import Image
 
+from supabase import create_client, Client
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -17,17 +17,6 @@ from langchain_core.output_parsers import StrOutputParser
 # 1. CONFIGURATION & ADMIN SETUP
 # ------------------------------------------------------------------------------
 ADMIN_USERNAME = "admin"  # Change this to your exact login username
-
-# Database path configuration with environment fallback
-target_dir = "/workspaces/AI-RETROSYNTHETIC-ANALYST"
-if os.path.exists(target_dir) or os.name != 'nt':
-    try:
-        os.makedirs(target_dir, exist_ok=True)
-        DB_PATH = os.path.join(target_dir, 'users.db')
-    except Exception:
-        DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.db')
-else:
-    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.db')
 
 st.set_page_config(
     page_title="AI Retrosynthetic Analyst",
@@ -55,49 +44,51 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------------------
-# 2. SQLITE DATABASE SETUP FOR USER AUTHENTICATION
+# 2. SUPABASE CLOUD DATABASE AUTHENTICATION
 # ------------------------------------------------------------------------------
-def init_db():
+# Initialize Supabase Client
+@st.cache_resource
+def init_supabase():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        st.error(f"Database initialization error: {e}")
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except KeyError:
+        st.error("⚠️ Supabase credentials missing from Streamlit Secrets.")
+        st.stop()
+
+supabase: Client = init_supabase()
 
 def make_hash(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 def check_user(username, password):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('SELECT password FROM users WHERE username = ?', (username,))
-        data = c.fetchone()
-        conn.close()
-        if data and data[0] == make_hash(password):
-            return True
-    except Exception:
-        pass
-    return False
+        response = supabase.table("users").select("password").eq("username", username).execute()
+        if len(response.data) > 0:
+            if response.data[0]['password'] == make_hash(password):
+                return True
+        return False
+    except Exception as e:
+        st.error(f"Login error: {e}")
+        return False
 
 def add_user(username, password):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('INSERT INTO users(username, password) VALUES (?, ?)', (username, make_hash(password)))
-        conn.commit()
-        conn.close()
+        # Check if username already exists
+        existing = supabase.table("users").select("username").eq("username", username).execute()
+        if len(existing.data) > 0:
+            return False  # Username taken
+        
+        # Insert new user
+        supabase.table("users").insert({
+            "username": username,
+            "password": make_hash(password)
+        }).execute()
         return True
-    except sqlite3.IntegrityError:
-        conn.close()
+    except Exception as e:
+        st.error(f"Registration error: {e}")
         return False
-    except Exception:
-        return False
-
-init_db()
 
 # Session State Initialization
 if 'logged_in' not in st.session_state:
@@ -167,30 +158,21 @@ with st.sidebar:
         help="gemini-3.8-flash is optimized for chemical synthesis tasks."
     )
 
-    # 🔒 RESTRICTED ADMIN PANEL WITH LIVE DEBUGGING
+    # 🔒 RESTRICTED ADMIN PANEL WITH SUPABASE CONNECTION
     if st.session_state['username'] == ADMIN_USERNAME:
         st.markdown("---")
         with st.expander("📊 Admin Panel: User Database"):
-            st.write(f"📁 **DB Path:** `{DB_PATH}`")
+            st.write("☁️ **Connected to Supabase Cloud**")
             try:
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';")
-                table_exists = c.fetchone()
+                response = supabase.table("users").select("username, id").execute()
+                registered_users = response.data
                 
-                if not table_exists:
-                    st.warning("⚠️ 'users' table does not exist yet.")
+                if registered_users:
+                    st.success(f"Total Permanent Accounts: {len(registered_users)}")
+                    for idx, user in enumerate(registered_users, 1):
+                        st.text(f"{idx}. {user['username']} (ID: {user['id']})")
                 else:
-                    c.execute("SELECT username FROM users")
-                    registered_users = c.fetchall()
-                    
-                    if registered_users:
-                        st.success(f"Total Accounts: {len(registered_users)}")
-                        for idx, user in enumerate(registered_users, 1):
-                            st.text(f"{idx}. {user[0]}")
-                    else:
-                        st.info("Table exists, but 0 users are registered yet.")
-                conn.close()
+                    st.info("0 users are registered yet.")
             except Exception as db_err:
                 st.error(f"Database error: {db_err}")
 
