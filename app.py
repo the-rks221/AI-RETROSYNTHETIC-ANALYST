@@ -16,10 +16,18 @@ from langchain_core.output_parsers import StrOutputParser
 # ------------------------------------------------------------------------------
 # 1. CONFIGURATION & ADMIN SETUP
 # ------------------------------------------------------------------------------
-ADMIN_USERNAME = "admin"  # Change this to your desired admin username
+ADMIN_USERNAME = "admin"  # Change this to your exact login username
 
-# Absolute path guarantee so users.db is always saved right next to app.py
-DB_PATH = "/workspaces/AI-RETROSYNTHETIC-ANALYST/users.db"
+# Database path configuration with environment fallback
+target_dir = "/workspaces/AI-RETROSYNTHETIC-ANALYST"
+if os.path.exists(target_dir) or os.name != 'nt':
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        DB_PATH = os.path.join(target_dir, 'users.db')
+    except Exception:
+        DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.db')
+else:
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'users.db')
 
 st.set_page_config(
     page_title="AI Retrosynthetic Analyst",
@@ -50,35 +58,43 @@ st.markdown("""
 # 2. SQLITE DATABASE SETUP FOR USER AUTHENTICATION
 # ------------------------------------------------------------------------------
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st.error(f"Database initialization error: {e}")
 
 def make_hash(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 def check_user(username, password):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT password FROM users WHERE username = ?', (username,))
-    data = c.fetchone()
-    conn.close()
-    if data and data[0] == make_hash(password):
-        return True
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('SELECT password FROM users WHERE username = ?', (username,))
+        data = c.fetchone()
+        conn.close()
+        if data and data[0] == make_hash(password):
+            return True
+    except Exception:
+        pass
     return False
 
 def add_user(username, password):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
     try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
         c.execute('INSERT INTO users(username, password) VALUES (?, ?)', (username, make_hash(password)))
         conn.commit()
         conn.close()
         return True
     except sqlite3.IntegrityError:
         conn.close()
+        return False
+    except Exception:
         return False
 
 init_db()
@@ -159,7 +175,6 @@ with st.sidebar:
             try:
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
-                # Check if table exists first
                 c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users';")
                 table_exists = c.fetchone()
                 
