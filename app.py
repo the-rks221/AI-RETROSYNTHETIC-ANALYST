@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,7 @@ from wikipedia.exceptions import DisambiguationError, PageError
 try:
     import py3Dmol
     from streamlit.components.v1 import html as st_html
+
     HAS_PY3DMOL = True
 except ImportError:
     HAS_PY3DMOL = False
@@ -110,6 +112,10 @@ if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "username" not in st.session_state:
     st.session_state["username"] = ""
+if "saved_molecules" not in st.session_state:
+    st.session_state["saved_molecules"] = {}
+if "active_mol_query" not in st.session_state:
+    st.session_state["active_mol_query"] = "Paracetamol"
 
 # ------------------------------------------------------------------------------
 # 3. AUTHENTICATION SCREEN (LOGIN / SIGN UP)
@@ -125,7 +131,7 @@ if not st.session_state["logged_in"]:
             st.subheader("Welcome Back!")
             login_user = st.text_input("Username", key="login_user")
             login_pass = st.text_input("Password", type="password", key="login_pass")
-            if st.button("Login"):
+            if st.button("Login", key="btn_login"):
                 if check_user(login_user, login_pass):
                     st.session_state["logged_in"] = True
                     st.session_state["username"] = login_user
@@ -138,7 +144,7 @@ if not st.session_state["logged_in"]:
             st.subheader("Create a New Account")
             new_user = st.text_input("Choose Username", key="signup_user")
             new_pass = st.text_input("Choose Password", type="password", key="signup_pass")
-            if st.button("Register"):
+            if st.button("Register", key="btn_register"):
                 if new_user.strip() and new_pass.strip():
                     if add_user(new_user, new_pass):
                         st.success("Account created successfully! Please switch to the Login tab.")
@@ -177,9 +183,9 @@ RUBRIC_MARKDOWN = """
 * **Literature & Precedent Strength (0–10 pts):** Documented reaction precedent vs. heuristic transfer.
 
 **Priority Tiers:**
-* **Priority 1 (`>= 75` pts + Literature-Supported):** Catalytic / renewable / lower-hazard option with documented precedent.
-* **Priority 2 (`55–74.9` pts):** Milder conditions, safer solvent, or lower-hazard reagent with reasonable practicality.
-* **Priority 3 (`< 55` pts or weak precedent):** Conditional swap requiring reaction optimization or bench validation.
+* **Priority 1 (75 or more pts + Literature-Supported):** Catalytic / renewable / lower-hazard option with documented precedent.
+* **Priority 2 (55–74.9 pts):** Milder conditions, safer solvent, or lower-hazard reagent with reasonable practicality.
+* **Priority 3 (less than 55 pts or weak precedent):** Conditional swap requiring reaction optimization or bench validation.
 """
 
 OFFLINE_GREEN_SWAPS: Dict[str, Dict[str, Any]] = {
@@ -461,6 +467,41 @@ OFFLINE_GREEN_SWAPS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+KNOWN_DRUG_FALLBACKS: Dict[str, Dict[str, Any]] = {
+    "paracetamol": {
+        "cid": 1983,
+        "iupac_name": "N-(4-hydroxyphenyl)acetamide",
+        "molecular_weight": 151.163,
+        "xlogp": 0.46,
+        "smiles": "CC(=O)Nc1ccc(O)cc1",
+        "synonyms": ["paracetamol", "acetaminophen"],
+    },
+    "acetaminophen": {
+        "cid": 1983,
+        "iupac_name": "N-(4-hydroxyphenyl)acetamide",
+        "molecular_weight": 151.163,
+        "xlogp": 0.46,
+        "smiles": "CC(=O)Nc1ccc(O)cc1",
+        "synonyms": ["acetaminophen", "paracetamol"],
+    },
+    "ibuprofen": {
+        "cid": 3672,
+        "iupac_name": "2-[4-(2-methylpropyl)phenyl]propanoic acid",
+        "molecular_weight": 206.28,
+        "xlogp": 3.5,
+        "smiles": "CC(C)Cc1ccc(C(C)C(=O)O)cc1",
+        "synonyms": ["ibuprofen"],
+    },
+    "aspirin": {
+        "cid": 2244,
+        "iupac_name": "2-acetyloxybenzoic acid",
+        "molecular_weight": 180.16,
+        "xlogp": 1.2,
+        "smiles": "CC(=O)Oc1ccccc1C(=O)O",
+        "synonyms": ["aspirin", "acetylsalicylic acid"],
+    },
+}
+
 
 def clamp_scores(raw_scores: Optional[Dict[str, Any]]) -> Dict[str, float]:
     src = raw_scores or {}
@@ -714,32 +755,86 @@ def score_and_format_green_steps(steps_data: List[dict], rdkit_profile: Dict[str
 
 
 # ------------------------------------------------------------------------------
-# 5. SOLUBILITY, CHEM-INFO & RETROSYNTHESIS HELPERS
+# 5. SOLUBILITY, CACHED CHEM-INFO & RETROSYNTHESIS HELPERS
 # ------------------------------------------------------------------------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_pubchem_lookup(mol_name: str) -> Optional[Dict[str, Any]]:
-    compounds = pcp.get_compounds(mol_name.strip().lower(), "name")
-    if not compounds:
+def extract_compound_fields(c) -> Optional[Dict[str, Any]]:
+    if c is None:
         return None
-    c = compounds[0]
+    smiles = (
+        getattr(c, "smiles", None)
+        or getattr(c, "isomeric_smiles", None)
+        or getattr(c, "connectivity_smiles", None)
+        or getattr(c, "canonical_smiles", None)
+    )
+    try:
+        mw_float = float(c.molecular_weight) if getattr(c, "molecular_weight", None) is not None else None
+    except (TypeError, ValueError):
+        mw_float = None
+    if not smiles or mw_float is None or mw_float <= 0:
+        return None
+    try:
+        xlogp_float = float(c.xlogp) if getattr(c, "xlogp", None) is not None else None
+    except (TypeError, ValueError):
+        xlogp_float = None
+    synonyms = getattr(c, "synonyms", None) or []
     return {
-        "cid": c.cid,
-        "iupac_name": c.iupac_name,
-        "molecular_weight": c.molecular_weight,
-        "xlogp": c.xlogp,
-        "isomeric_smiles": c.isomeric_smiles,
-        "canonical_smiles": c.canonical_smiles,
-        "synonyms": c.synonyms[:5] if c.synonyms else [],
+        "cid": getattr(c, "cid", None),
+        "iupac_name": getattr(c, "iupac_name", None),
+        "molecular_weight": mw_float,
+        "xlogp": xlogp_float,
+        "smiles": smiles,
+        "synonyms": list(synonyms[:10]),
     }
 
 
+def is_drug(compound_data: Dict[str, Any]) -> bool:
+    non_drugs = {
+        "water", "methane", "benzene", "toluene", "hexane", "cyclohexane",
+        "sodium chloride", "table salt", "ethanol", "methanol", "acetone",
+    }
+    syns = [str(s).strip().lower() for s in (compound_data.get("synonyms") or [])[:5]]
+    if syns and syns[0] in non_drugs:
+        return False
+    return True
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_sdf_data(cid: int) -> Optional[str]:
+def cached_pubchem_lookup(mol_name: str) -> Dict[str, Any]:
+    cleaned = mol_name.strip()
+    key = cleaned.lower()
+
+    compounds = []
+    for attempt in range(2):
+        try:
+            compounds = pcp.get_compounds(cleaned, "name") or []
+            if not compounds and key != cleaned:
+                compounds = pcp.get_compounds(key, "name") or []
+            if compounds:
+                break
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.8)
+
+    for comp in compounds:
+        parsed = extract_compound_fields(comp)
+        if parsed is not None:
+            return {"status": "ok", "data": parsed, "source": "pubchem"}
+
+    if key in KNOWN_DRUG_FALLBACKS:
+        return {"status": "ok", "data": KNOWN_DRUG_FALLBACKS[key], "source": "fallback"}
+
+    return {"status": "not_found", "data": None, "source": "none"}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_sdf_data(cid: Optional[int]) -> Optional[str]:
+    if not cid:
+        return None
     for rec_type in ("3d", "2d"):
         url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF/?record_type={rec_type}"
         try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                return resp.read().decode("utf-8")
+            with urllib.request.urlopen(url, timeout=5) as response:
+                return response.read().decode("utf-8")
         except Exception:
             continue
     return None
@@ -753,30 +848,11 @@ def cached_wiki_summary(drug_name: str) -> str:
         try:
             return wikipedia.summary(e.options[0], sentences=3)
         except Exception:
-            return "Multiple entries found on Wikipedia."
+            return "Multiple Wikipedia entries found for this query."
+    except PageError:
+        return "No detailed summary found on Wikipedia for this query."
     except Exception:
-        return "Summary unavailable."
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_gemini_synthesis(mol_name: str, smiles: str, profile_json: str, model_name: str):
-    return get_gemini_retrosynthesis(mol_name, smiles, json.loads(profile_json), model_name)
-def is_drug(molecule_data) -> bool:
-    non_drugs = {"water", "methane", "benzene", "salt", "sodium chloride", "ethanol"}
-    if molecule_data.synonyms and any(nd in molecule_data.synonyms[0].lower() for nd in non_drugs):
-        return False
-    return True
-
-
-def get_sdf_data(cid: int) -> str:
-    for rec_type in ("3d", "2d"):
-        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF/?record_type={rec_type}"
-        try:
-            with urllib.request.urlopen(url, timeout=10) as response:
-                return response.read().decode("utf-8")
-        except Exception:
-            continue
-    raise RuntimeError("SDF unavailable")
+        return "Could not retrieve literature text from Wikipedia."
 
 
 def generate_solubility_curves(mol_weight: float, logp: float):
@@ -799,23 +875,16 @@ def generate_solubility_curves(mol_weight: float, logp: float):
     return concentrations, solubility_conc, temps, solubility_temp, pressures, solubility_press, ph_vals, solubility_ph
 
 
-def get_aquatic_summary(drug_name: str, compound) -> str:
-    try:
-        wiki_summary = wikipedia.summary(drug_name, sentences=4, auto_suggest=False)
-    except DisambiguationError as e:
-        try:
-            wiki_summary = wikipedia.summary(e.options[0], sentences=4)
-        except Exception:
-            wiki_summary = "Multiple Wikipedia entries found for this query."
-    except PageError:
-        wiki_summary = "No detailed summary found on Wikipedia for this query."
-    except Exception:
-        wiki_summary = "Could not retrieve literature text from Wikipedia."
+def get_aquatic_summary(drug_name: str, compound_data: Dict[str, Any]) -> str:
+    wiki_summary = cached_wiki_summary(drug_name)
+    iupac = compound_data.get("iupac_name") or drug_name
+    mw = compound_data.get("molecular_weight")
+    xlogp = compound_data.get("xlogp")
 
     return (
         f"### 💧 Aqueous Solubility & Aquatic Behaviour Summary\n\n"
-        f"**Chemical Identity:** `{compound.iupac_name or drug_name}` | **MW:** {compound.molecular_weight} g/mol\n\n"
-        f"**Aquatic Behavior:** Estimated XLogP3 is **{compound.xlogp if compound.xlogp is not None else 'Unknown'}**, "
+        f"**Chemical Identity:** `{iupac}` | **MW:** {mw} g/mol\n\n"
+        f"**Aquatic Behavior:** Estimated XLogP3 is **{xlogp if xlogp is not None else 'Unknown'}**, "
         f"influencing aqueous solubility, ionization/pH partitioning, and environmental/biological transport.\n\n"
         f"**Reference Summary:**\n> {wiki_summary}"
     )
@@ -829,19 +898,19 @@ def generate_disconnection_gif(target_smiles: str, synthon_smiles: str, output_g
             return None
 
         frames: List[Image.Image] = []
-        img_target = Draw.MolToImage(target_mol, size=(350, 350))
-        frames.extend([img_target] * 4)
+        img_target = Draw.MolToImage(target_mol, size=(240, 240))
+        frames.extend([img_target] * 2)
 
         img_highlight = Draw.MolToImage(
             target_mol,
-            size=(350, 350),
+            size=(240, 240),
             highlightAtoms=list(range(target_mol.GetNumAtoms())),
             highlightColor=(1, 0.4, 0.4),
         )
         frames.extend([img_highlight] * 2)
 
-        img_synthons = Draw.MolToImage(synthon_mol, size=(350, 350))
-        frames.extend([img_synthons] * 5)
+        img_synthons = Draw.MolToImage(synthon_mol, size=(240, 240))
+        frames.extend([img_synthons] * 3)
 
         frames[0].save(output_gif_path, save_all=True, append_images=frames[1:], duration=500, loop=0)
         return output_gif_path
@@ -928,6 +997,76 @@ def get_gemini_retrosynthesis(molecule_name: str, smiles: str, rdkit_profile: Di
     return extract_text_and_json(raw_result)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_gemini_synthesis(mol_name: str, smiles: str, profile_json: str, model_name: str):
+    return get_gemini_retrosynthesis(mol_name, smiles, json.loads(profile_json), model_name)
+
+
+def build_and_store_molecule_analysis(
+    mol_name: str,
+    model_name: str,
+    selected_rxns: Optional[List[str]],
+    include_wiki: bool,
+) -> Dict[str, Any]:
+    """Runs full analysis for a molecule and stores it in session_state for reuse."""
+    lookup = cached_pubchem_lookup(mol_name)
+    if lookup["status"] != "ok" or not lookup["data"]:
+        return {"error": "There is not enough data to show."}
+
+    comp_data = lookup["data"]
+    if not is_drug(comp_data):
+        return {"error": "The given molecule is not a drug."}
+
+    smiles = comp_data["smiles"]
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return {"error": "There is not enough data to show."}
+
+    profile = get_rdkit_profile(mol)
+    safe_logp = float(comp_data["xlogp"]) if comp_data.get("xlogp") is not None else 2.0
+    curves = generate_solubility_curves(float(comp_data["molecular_weight"]), safe_logp)
+    aquatic_md = get_aquatic_summary(mol_name, comp_data) if include_wiki else (
+        f"**Chemical Identity:** `{comp_data.get('iupac_name') or mol_name}` | "
+        f"**MW:** {comp_data['molecular_weight']} g/mol | **XLogP3:** {comp_data.get('xlogp', 'Unknown')}"
+    )
+
+    report_text = ""
+    parsed_json: dict = {"pathways": [], "green_steps": []}
+    if os.environ.get("GOOGLE_API_KEY"):
+        try:
+            report_text, parsed_json = cached_gemini_synthesis(
+                mol_name,
+                smiles,
+                json.dumps(profile),
+                model_name,
+            )
+        except Exception as e:
+            report_text = f"⚠️ Gemini synthesis fallback (`{e}`). Using built-in green chemistry rankings."
+
+    raw_green_steps = parsed_json.get("green_steps") or []
+    if raw_green_steps:
+        steps_to_score = [blend_step_with_offline_swaps(s) for s in raw_green_steps]
+    else:
+        steps_to_score = get_offline_green_steps(mol_name, profile, selected_reactions=selected_rxns)
+
+    green_md = score_and_format_green_steps(steps_to_score, profile)
+
+    record = {
+        "query": mol_name,
+        "source": lookup.get("source", "pubchem"),
+        "comp_data": comp_data,
+        "smiles": smiles,
+        "profile": profile,
+        "curves": curves,
+        "aquatic_md": aquatic_md,
+        "report_text": report_text,
+        "green_md": green_md,
+        "pathways": parsed_json.get("pathways") or [],
+    }
+    st.session_state["saved_molecules"][mol_name.strip().lower()] = record
+    return record
+
+
 # ------------------------------------------------------------------------------
 # 6. MAIN STREAMLIT DASHBOARD
 # ------------------------------------------------------------------------------
@@ -940,26 +1079,17 @@ except Exception:
     pass
 
 with st.sidebar:
-    mechanism_filter = st.selectbox(
-        "Green Swap Mechanism Filter",
-        ["Auto"] + CANONICAL_MECHANISMS,
-    )
-    fast_mode = st.checkbox(
-        "⚡ Fast Mode (Skip GIFs)",
-        value=True,
-        help="Skips multi-frame GIF rendering for faster responses.",
-    )
     st.write(f"👤 Logged in as: **{st.session_state['username']}**")
     st.markdown(f"🛡️ **Role:** `{'Administrator' if st.session_state['username'] == ADMIN_USERNAME else 'Standard User'}`")
-    if st.button("🚪 Logout"):
+    if st.button("🚪 Logout", key="btn_logout"):
         st.session_state["logged_in"] = False
         st.session_state["username"] = ""
         st.rerun()
 
     st.markdown("---")
-    st.header("⚙️ Gemini & Mechanism Settings")
+    st.header("⚙️ Gemini & Cache Controls")
     if not os.environ.get("GOOGLE_API_KEY"):
-        manual_key = st.text_input("Gemini API Key (if not in Secrets)", type="password")
+        manual_key = st.text_input("Gemini API Key (if not in Secrets)", type="password", key="manual_gemini_key")
         if manual_key.strip():
             os.environ["GOOGLE_API_KEY"] = manual_key.strip()
 
@@ -967,12 +1097,38 @@ with st.sidebar:
         "Select Gemini Model",
         ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"],
         help="Gemini model used for multi-pathway retrosynthesis and green-swap evaluation.",
+        key="gemini_model_select",
     )
     mechanism_filter = st.selectbox(
         "Green Swap Mechanism Filter",
         ["Auto"] + CANONICAL_MECHANISMS,
         key="green_swap_mechanism_filter",
     )
+    fast_mode = st.checkbox(
+        "⚡ Fast Mode (Skip GIFs & Wiki)",
+        value=True,
+        help="Skips slower Wikipedia lookups and multi-frame GIF rendering for rapid testing.",
+        key="fast_mode_checkbox",
+    )
+
+    if st.button("🧹 Clear Cache & Saved Data", key="btn_clear_cache"):
+        st.cache_data.clear()
+        st.session_state["saved_molecules"] = {}
+        st.success("Cache and saved molecule session data cleared.")
+        st.rerun()
+
+    if st.session_state["saved_molecules"]:
+        st.markdown("---")
+        st.subheader("💾 Saved Molecules")
+        saved_keys = list(st.session_state["saved_molecules"].keys())
+        picked_saved = st.selectbox(
+            "Load previously analyzed molecule",
+            options=[""] + saved_keys,
+            format_func=lambda k: "— Select saved molecule —" if k == "" else k.title(),
+            key="saved_mol_picker",
+        )
+        if picked_saved:
+            st.session_state["active_mol_query"] = st.session_state["saved_molecules"][picked_saved]["query"]
 
     if st.session_state["username"] == ADMIN_USERNAME:
         st.markdown("---")
@@ -994,13 +1150,14 @@ col1, col2 = st.columns([3, 1])
 with col1:
     target_input = st.text_input(
         "Enter Drug / Organic Molecule Name:",
-        value="Paracetamol",
+        value=st.session_state["active_mol_query"],
         placeholder="e.g., Ibuprofen, Aspirin, Paracetamol",
+        key="target_mol_input",
     )
 with col2:
     st.write(" ")
     st.write(" ")
-    analyze_btn = st.button("🚀 Analyze Solubility & Synthesis")
+    analyze_btn = st.button("🚀 Analyze & Save", key="btn_analyze_save")
 
 if analyze_btn:
     mol_name = target_input.strip()
@@ -1008,64 +1165,55 @@ if analyze_btn:
         st.warning("Please enter a molecule name.")
         st.stop()
 
-    with st.spinner(f"🔍 Searching PubChem for '{mol_name}'..."):
-        try:
-            compounds = cached_pubchem_lookup(mol_name)
-            cached_gemini_synthesis(mol_name, smiles, json.dumps(profile), selected_model)
-            compounds = pcp.get_compounds(mol_name, "name")
-        except Exception:
-            st.error("There is not enough data to show.")
-            st.stop()
+    st.session_state["active_mol_query"] = mol_name
+    selected_rxns = None if mechanism_filter == "Auto" else [mechanism_filter]
 
-    if not compounds:
-        st.error("There is not enough data to show.")
+    with st.spinner(f"🔬 Analyzing and caching '{mol_name}'..."):
+        result = build_and_store_molecule_analysis(
+            mol_name=mol_name,
+            model_name=selected_model,
+            selected_rxns=selected_rxns,
+            include_wiki=not fast_mode,
+        )
+
+    if "error" in result:
+        st.error(result["error"])
         st.stop()
 
-    compound = compounds[0]
-    if not is_drug(compound):
-        st.error("The given molecule is not a drug.")
-        st.stop()
+    comp_data = result["comp_data"]
+    smiles = result["smiles"]
+    mol = Chem.MolFromSmiles(smiles)
+    profile = result["profile"]
+    c_x, c_y, t_x, t_y, p_x, p_y, ph_x, ph_y = result["curves"]
 
-    smiles = compound.isomeric_smiles or compound.canonical_smiles
-    mol = Chem.MolFromSmiles(smiles) if smiles else None
-    if mol is None or compound.molecular_weight is None:
-        st.error("There is not enough data to show.")
-        st.stop()
-
-    profile = get_rdkit_profile(mol)
-    st.subheader(f"Molecule Identified: {compound.iupac_name or mol_name}")
+    st.success(f"Saved '{mol_name}' in session & cache (source: `{result['source']}`).")
+    st.subheader(f"Molecule Identified: {comp_data.get('iupac_name') or mol_name}")
     st.code(f"SMILES: {smiles}")
     st.markdown(
         f"**RDKit Profile:** MW = `{profile['mol_wt']}` g/mol | cLogP = `{profile['clogp']}` | "
         f"TPSA = `{profile['tpsa']}` Å² | Motifs = `{', '.join(profile['functional_groups']) or 'None flagged'}`"
     )
 
-    # 2D & 3D Structure View
     c_2d, c_3d = st.columns(2)
     with c_2d:
         st.image(Draw.MolToImage(mol, size=(300, 300)), caption="2D Structure (RDKit)", width=260)
     with c_3d:
         if HAS_PY3DMOL:
-            try:
-                sdf_data = get_sdf_data(compound.cid)
+            sdf_data = cached_sdf_data(comp_data.get("cid"))
+            if sdf_data:
                 viewer = py3Dmol.view(width=420, height=280)
                 viewer.addModel(sdf_data, "sdf")
                 viewer.setStyle({"stick": {"radius": 0.15}, "sphere": {"scale": 0.28}})
                 viewer.setBackgroundColor("#0E1117")
                 viewer.zoomTo()
                 st_html(viewer._make_html(), height=290)
-            except Exception:
+            else:
                 st.info("3D conformer unavailable for this entry.")
         else:
             st.info("Install `py3Dmol` for an interactive 3D conformer viewer.")
 
-    # Solubility & Thermodynamic Curves
     st.markdown("---")
     st.header("📈 Solubility & Thermodynamic Curves")
-    safe_logp = float(compound.xlogp) if compound.xlogp is not None else 2.0
-    c_x, c_y, t_x, t_y, p_x, p_y, ph_x, ph_y = generate_solubility_curves(float(compound.molecular_weight), safe_logp)
-
-    fig = go.Figure()
     g1, g2 = st.columns(2)
     with g1:
         f1 = go.Figure(go.Scatter(x=c_x, y=c_y, mode="lines", line=dict(color="#00FFCC", width=3)))
@@ -1084,40 +1232,17 @@ if analyze_btn:
         f4.update_layout(title="Solubility vs pH (Henderson–Hasselbalch)", xaxis_title="pH", yaxis_title="Solubility (mol/L)", yaxis_type="log", template="plotly_dark", height=320)
         st.plotly_chart(f4, use_container_width=True)
 
-    st.markdown(get_aquatic_summary(mol_name, compound))
+    st.markdown(result["aquatic_md"])
 
-    # Retrosynthesis + Blended Green Chemistry Ranking
     st.markdown("---")
     st.header("🧬 Multi-Pathway Retrosynthesis & Green Swap Ranking")
-    selected_rxns = None if mechanism_filter == "Auto" else [mechanism_filter]
+    if result["report_text"]:
+        st.markdown(result["report_text"])
+    st.markdown(result["green_md"])
 
-    report_text = ""
-    parsed_json: dict = {"pathways": [], "green_steps": []}
-
-    if os.environ.get("GOOGLE_API_KEY"):
-        with st.spinner("⚙️ Gemini is evaluating retrosynthetic pathways and green chemistry swaps..."):
-            try:
-                report_text, parsed_json = get_gemini_retrosynthesis(mol_name, smiles, profile, selected_model)
-                st.markdown(report_text)
-            except Exception as e:
-                st.warning(f"Gemini call fallback ({e}); displaying built-in green swap rankings.")
-    else:
-        st.info("No `GOOGLE_API_KEY` set; running built-in `OFFLINE_GREEN_SWAPS` rankings.")
-
-    raw_green_steps = parsed_json.get("green_steps") or []
-    if raw_green_steps:
-        steps_to_score = [blend_step_with_offline_swaps(s) for s in raw_green_steps]
-    else:
-        steps_to_score = get_offline_green_steps(mol_name, profile, selected_reactions=selected_rxns)
-
-    st.markdown(score_and_format_green_steps(steps_to_score, profile))
-
-    # Disconnection GIFs if returned by Gemini
-    if not fast_mode:
-     pathways = parsed_json.get("pathways") or []
-     if pathways:
+    if not fast_mode and result["pathways"]:
         st.header("🎬 Animated Disconnection Simulations")
-        for path_idx, pathway in enumerate(pathways, 1):
+        for path_idx, pathway in enumerate(result["pathways"], 1):
             st.subheader(f"📌 {pathway.get('pathway_name', f'Pathway {path_idx}')}")
             steps = pathway.get("steps", [])
             if steps:
@@ -1134,7 +1259,7 @@ if analyze_btn:
                                 st.image(out_gif)
 
     full_export = "\n\n".join(
-        part for part in [report_text, score_and_format_green_steps(steps_to_score, profile)] if part
+        part for part in [result["aquatic_md"], result["report_text"], result["green_md"]] if part
     )
     safe_name = "".join([c for c in mol_name if c.isalnum() or c == " "]).strip().replace(" ", "_")
     st.download_button(
@@ -1142,4 +1267,5 @@ if analyze_btn:
         data=full_export,
         file_name=f"{safe_name}_Solubility_and_Green_Retrosynthesis.md",
         mime="text/markdown",
+        key="btn_download_report",
     )
