@@ -668,10 +668,14 @@ def build_fallback_pathways(mol_name: str, smiles: str, profile: Dict[str, Any])
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_concise_retrosynthesis(mol_name: str, smiles: str, profile_json: str, model_name: str) -> Dict[str, Any]:
     profile = json.loads(profile_json)
+    fallback = build_fallback_pathways(mol_name, smiles, profile)
     if not os.environ.get("GOOGLE_API_KEY"):
-        return build_fallback_pathways(mol_name, smiles, profile)
+        return fallback
 
-    llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.15)
+    models_to_try = [model_name]
+    if "gemini-3.5-flash-lite" not in models_to_try:
+        models_to_try.append("gemini-3.5-flash-lite")
+
     prompt = PromptTemplate(
         input_variables=["molecule", "smiles", "profile", "mechs"],
         template=(
@@ -690,38 +694,58 @@ def cached_concise_retrosynthesis(mol_name: str, smiles: str, profile_json: str,
             "Keep text concise for fast response."
         ),
     )
-    raw = (prompt | llm | StrOutputParser()).invoke(
-        {
-            "molecule": mol_name,
-            "smiles": smiles,
-            "profile": json.dumps(profile),
-            "mechs": ", ".join(CANONICAL_MECHANISMS),
-        }
-    )
-    text = raw if isinstance(raw, str) else "\n".join(str(x) for x in raw)
-    pathways: List[dict] = []
-    green_steps: List[dict] = []
 
-    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        clean_md = text.replace(m.group(0), "").strip()
+    last_err = None
+    for m_name in models_to_try:
         try:
-            obj = json.loads(m.group(1))
-            if isinstance(obj, dict):
-                pathways = obj.get("pathways") or []
-                green_steps = obj.get("green_steps") or []
-        except Exception:
-            pass
-    else:
-        clean_md = text.strip()
+            llm = ChatGoogleGenerativeAI(model=m_name, temperature=0.15, max_retries=0)
+            raw = (prompt | llm | StrOutputParser()).invoke(
+                {
+                    "molecule": mol_name,
+                    "smiles": smiles,
+                    "profile": json.dumps(profile),
+                    "mechs": ", ".join(CANONICAL_MECHANISMS),
+                }
+            )
+            text = raw if isinstance(raw, str) else "\n".join(str(x) for x in raw)
+            pathways: List[dict] = []
+            green_steps: List[dict] = []
 
-    fallback = build_fallback_pathways(mol_name, smiles, profile)
-    if not clean_md:
-        clean_md = fallback["markdown"]
-    if not pathways:
-        pathways = fallback["pathways"]
+            match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+            if match:
+                clean_md = text.replace(match.group(0), "").strip()
+                try:
+                    obj = json.loads(match.group(1))
+                    if isinstance(obj, dict):
+                        pathways = obj.get("pathways") or []
+                        green_steps = obj.get("green_steps") or []
+                except Exception:
+                    pass
+            else:
+                clean_md = text.strip()
 
-    return {"markdown": clean_md, "pathways": pathways, "green_steps": green_steps}
+            return {
+                "markdown": clean_md or fallback["markdown"],
+                "pathways": pathways or fallback["pathways"],
+                "green_steps": green_steps,
+            }
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                continue
+            break
+
+    note = (
+        "ℹ️ *Daily free-tier Gemini quota reached (429).* Showing instant offline retrosynthesis & green-swap rankings.\n\n"
+        if last_err and ("429" in str(last_err) or "RESOURCE_EXHAUSTED" in str(last_err))
+        else f"⚠️ LLM fallback (`{last_err}`).\n\n"
+    )
+    return {
+        "markdown": note + fallback["markdown"],
+        "pathways": fallback["pathways"],
+        "green_steps": [],
+    }
 
 
 def generate_disconnection_gif(target_smiles: str, synthon_smiles: str, out_path: str) -> Optional[str]:
