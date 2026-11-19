@@ -764,7 +764,7 @@ with st.sidebar:
         if k_in.strip():
             os.environ["GOOGLE_API_KEY"] = k_in.strip()
 
-   selected_model = st.selectbox(
+    selected_model = st.selectbox(
         "Gemini Model",
         ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"],
         key="sb_model_select",
