@@ -1010,8 +1010,10 @@ if analyze_btn:
 
     with st.spinner(f"🔍 Searching PubChem for '{mol_name}'..."):
         try:
-            compounds = cached_pubchem_lookup(mol_name)
-            cached_gemini_synthesis(mol_name, smiles, json.dumps(profile), selected_model)
+            try:
+             compounds = cached_pubchem_lookup(mol_name)
+             cached_gemini_synthesis(mol_name, smiles, json.dumps(profile), selected_model)
+            except compounds = pcp.get_compounds(mol_name, "name")
         except Exception:
             st.error("There is not enough data to show.")
             st.stop()
