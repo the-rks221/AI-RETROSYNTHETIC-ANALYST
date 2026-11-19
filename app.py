@@ -749,6 +749,7 @@ def cached_concise_retrosynthesis(mol_name: str, smiles: str, profile_json: str,
 
 
 import io
+from PIL import ImageDraw
 
 
 def generate_disconnection_gif_bytes(target_smiles: str, synthon_smiles: str) -> Optional[bytes]:
@@ -757,28 +758,52 @@ def generate_disconnection_gif_bytes(target_smiles: str, synthon_smiles: str) ->
         if m1 is None or m1.GetNumAtoms() == 0:
             return None
 
-        # Use synthon_smiles if valid; otherwise fall back to a second view of target_mol
+        # Pick a secondary molecule: use synthon_smiles if different & valid, else a fragment/substructure
         m2 = Chem.MolFromSmiles(synthon_smiles or "")
-        img1 = Draw.MolToImage(m1, size=(240, 240)).convert("RGB")
-        if m2 is not None and m2.GetNumAtoms() > 0:
-            img2 = Draw.MolToImage(m2, size=(240, 240)).convert("RGB")
-        else:
-            highlight_atoms = list(range(min(4, m1.GetNumAtoms())))
-            img2 = Draw.MolToImage(
-                m1,
+        s1_can = Chem.MolToSmiles(m1)
+        s2_can = Chem.MolToSmiles(m2) if (m2 is not None and m2.GetNumAtoms() > 0) else ""
+
+        if not s2_can or s2_can == s1_can:
+            # Split at a non-ring single bond if available to show a disconnected fragment
+            cut_bonds = [
+                b.GetIdx()
+                for b in m1.GetBonds()
+                if not b.IsInRing() and b.GetBondType() == Chem.BondType.SINGLE
+            ]
+            if cut_bonds:
+                frag_mol = Chem.FragmentOnBonds(m1, [cut_bonds[0]], addDummies=False)
+                frags = Chem.GetMolFrags(frag_mol, asMols=True, sanitizeFrags=True)
+                m2 = max(frags, key=lambda x: x.GetNumAtoms()) if frags else m1
+            else:
+                m2 = m1
+
+        highlight_ids = list(range(min(3, m1.GetNumAtoms())))
+
+        def _make_frame(mol_obj, label: str, highlight: Optional[List[int]] = None) -> Image.Image:
+            img = Draw.MolToImage(
+                mol_obj,
                 size=(240, 240),
-                highlightAtoms=highlight_atoms,
+                highlightAtoms=highlight or [],
             ).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([4, 4, 236, 26], fill=(20, 24, 33))
+            draw.text((10, 10), label, fill=(0, 255, 204))
+            return img
+
+        f1 = _make_frame(m1, "1. Target Molecule")
+        f2 = _make_frame(m1, "2. Disconnection Site", highlight=highlight_ids)
+        f3 = _make_frame(m2, "3. Synthon / Fragment")
 
         buf = io.BytesIO()
-        frames = [img1, img1, img2, img2]
+        frames = [f1, f1, f2, f2, f3, f3]
         frames[0].save(
             buf,
             format="GIF",
             save_all=True,
             append_images=frames[1:],
-            duration=500,
+            duration=550,
             loop=0,
+            disposal=2,
         )
         buf.seek(0)
         return buf.getvalue()
