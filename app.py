@@ -11,7 +11,6 @@ import numpy as np
 import plotly.graph_objects as go
 import pubchempy as pcp
 import streamlit as st
-import wikipedia
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -19,7 +18,6 @@ from PIL import Image
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Draw, rdMolDescriptors
 from supabase import Client, create_client
-from wikipedia.exceptions import DisambiguationError, PageError
 
 try:
     import py3Dmol
@@ -30,12 +28,12 @@ except ImportError:
     HAS_PY3DMOL = False
 
 # ------------------------------------------------------------------------------
-# 1. CONFIGURATION & ADMIN SETUP
+# 1. PAGE CONFIG & STYLES
 # ------------------------------------------------------------------------------
 ADMIN_USERNAME = "admin"
 
 st.set_page_config(
-    page_title="AI Retrosynthetic & Solubility Analyst",
+    page_title="AI Retrosynthetic & Solubility Workbench",
     page_icon="🧪",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -48,7 +46,7 @@ st.markdown(
         color: #00FFCC;
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         text-align: center;
-        margin-bottom: 20px;
+        margin-bottom: 16px;
     }
     .stButton>button {
         background-color: #2E7D32;
@@ -63,7 +61,7 @@ st.markdown(
 )
 
 # ------------------------------------------------------------------------------
-# 2. SUPABASE CLOUD DATABASE AUTHENTICATION
+# 2. SUPABASE AUTHENTICATION
 # ------------------------------------------------------------------------------
 @st.cache_resource
 def init_supabase() -> Client:
@@ -85,10 +83,8 @@ def make_hash(password: str) -> str:
 
 def check_user(username: str, password: str) -> bool:
     try:
-        response = supabase.table("users").select("password").eq("username", username).execute()
-        if len(response.data) > 0 and response.data[0]["password"] == make_hash(password):
-            return True
-        return False
+        res = supabase.table("users").select("password").eq("username", username).execute()
+        return bool(res.data and res.data[0]["password"] == make_hash(password))
     except Exception as e:
         st.error(f"Login error: {e}")
         return False
@@ -97,65 +93,58 @@ def check_user(username: str, password: str) -> bool:
 def add_user(username: str, password: str) -> bool:
     try:
         existing = supabase.table("users").select("username").eq("username", username).execute()
-        if len(existing.data) > 0:
+        if existing.data:
             return False
-        supabase.table("users").insert(
-            {"username": username, "password": make_hash(password)}
-        ).execute()
+        supabase.table("users").insert({"username": username, "password": make_hash(password)}).execute()
         return True
     except Exception as e:
         st.error(f"Registration error: {e}")
         return False
 
 
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
-if "username" not in st.session_state:
-    st.session_state["username"] = ""
-if "saved_molecules" not in st.session_state:
-    st.session_state["saved_molecules"] = {}
-if "active_mol_query" not in st.session_state:
-    st.session_state["active_mol_query"] = "Paracetamol"
+for k, v in {
+    "logged_in": False,
+    "username": "",
+    "saved_molecules": {},
+    "active_mol_query": "Paracetamol",
+    "last_record": None,
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # ------------------------------------------------------------------------------
-# 3. AUTHENTICATION SCREEN (LOGIN / SIGN UP)
+# 3. AUTHENTICATION GATE
 # ------------------------------------------------------------------------------
 if not st.session_state["logged_in"]:
     st.markdown("<h1 class='main-title'>🔐 AI Retrosynthetic Analyst Portal</h1>", unsafe_allow_html=True)
-
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
         tab_login, tab_signup = st.tabs(["🔑 Login", "📝 Sign Up"])
-
         with tab_login:
-            st.subheader("Welcome Back!")
-            login_user = st.text_input("Username", key="login_user")
-            login_pass = st.text_input("Password", type="password", key="login_pass")
+            u = st.text_input("Username", key="login_user")
+            p = st.text_input("Password", type="password", key="login_pass")
             if st.button("Login", key="btn_login"):
-                if check_user(login_user, login_pass):
+                if check_user(u, p):
                     st.session_state["logged_in"] = True
-                    st.session_state["username"] = login_user
-                    st.success("Login successful! Loading dashboard...")
+                    st.session_state["username"] = u
                     st.rerun()
                 else:
                     st.error("Invalid username or password.")
-
         with tab_signup:
-            st.subheader("Create a New Account")
-            new_user = st.text_input("Choose Username", key="signup_user")
-            new_pass = st.text_input("Choose Password", type="password", key="signup_pass")
-            if st.button("Register", key="btn_register"):
-                if new_user.strip() and new_pass.strip():
-                    if add_user(new_user, new_pass):
-                        st.success("Account created successfully! Please switch to the Login tab.")
+            nu = st.text_input("Choose Username", key="signup_user")
+            np_ = st.text_input("Choose Password", type="password", key="signup_pass")
+            if st.button("Register", key="btn_signup"):
+                if nu.strip() and np_.strip():
+                    if add_user(nu.strip(), np_.strip()):
+                        st.success("Account created! Switch to Login.")
                     else:
-                        st.error("Username already exists. Choose another.")
+                        st.error("Username already exists.")
                 else:
-                    st.warning("Please fill in all fields.")
+                    st.warning("Please fill in both fields.")
     st.stop()
 
 # ------------------------------------------------------------------------------
-# 4. GREEN CHEMISTRY RUBRIC, MECHANISM ANCHORS & OFFLINE SWAPS
+# 4. GREEN CHEMISTRY RUBRIC & OFFLINE SWAPS
 # ------------------------------------------------------------------------------
 CANONICAL_MECHANISMS = [
     "Esterification",
@@ -166,7 +155,7 @@ CANONICAL_MECHANISMS = [
     "Buchwald-Hartwig",
 ]
 
-SCORE_CAPS: Dict[str, float] = {
+SCORE_CAPS = {
     "catalysis_atom": 30.0,
     "hazard_guide": 25.0,
     "mildness": 20.0,
@@ -174,331 +163,186 @@ SCORE_CAPS: Dict[str, float] = {
     "precedent": 10.0,
 }
 
-RUBRIC_MARKDOWN = """
-### 📊 Green Chemistry Scoring Rubric (0–100 Scale)
-* **Catalysis & Atom / E-Factor Profile (0–30 pts):** Catalytic turnover vs. stoichiometric loading, atom economy, and renewable/bio-derived feedstock potential.
-* **Solvent & Reagent Hazard / Green Guides (0–25 pts):** Alignment with ACS GCI / CHEM21 solvent tiers and PubChem/GHS hazard profiles (CMR, aquatic toxicity, flammability/peroxides).
-* **Reaction Conditions & Process Mildness (0–20 pts):** Mild temperature/pressure, avoiding cryogenic or harsh anhydrous/high-T extremes, and simplified workup.
-* **Mechanistic & Chemoselectivity Fit (0–15 pts):** Match to transformation class and tolerance of competing functional groups.
-* **Literature & Precedent Strength (0–10 pts):** Documented reaction precedent vs. heuristic transfer.
-
-**Priority Tiers:**
-* **Priority 1 (75 or more pts + Literature-Supported):** Catalytic / renewable / lower-hazard option with documented precedent.
-* **Priority 2 (55–74.9 pts):** Milder conditions, safer solvent, or lower-hazard reagent with reasonable practicality.
-* **Priority 3 (less than 55 pts or weak precedent):** Conditional swap requiring reaction optimization or bench validation.
-"""
-
 OFFLINE_GREEN_SWAPS: Dict[str, Dict[str, Any]] = {
     "esterification": {
         "mechanism_type": "Esterification",
-        "mechanism_rationale": (
-            "Replaces stoichiometric coupling agents or corrosive acyl chlorides/mineral acids "
-            "with catalytic Brønsted/Lewis acid or mild dehydrative/transesterification pathways "
-            "that shift equilibrium (e.g., water/alcohol removal or excess green alcohol/ester)."
-        ),
+        "mechanism_rationale": "Catalytic acid or lipase/transesterification in greener media (2-MeTHF, EtOAc, alcohols) replacing stoichiometric coupling agents.",
         "candidates": [
             {
-                "name": "Catalytic Solid/Heterogeneous Acid in Bio-Derived Solvent",
+                "name": "Heterogeneous / Catalytic Acid in EtOAc or 2-MeTHF",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Proton/Lewis acid activation of carboxylic acid carbonyl for nucleophilic attack by alcohol",
-                "reagents_conditions": "Amberlyst-15 or H2SO4 (1–5 mol%), 2-MeTHF or EtOAc, reflux with Dean-Stark / molecular sieves",
-                "solvent_tier": "CHEM21 Recommended (2-MeTHF / EtOAc) over chlorinated or excess toxic solvents",
+                "mechanism_role": "Acid-catalyzed acyl-oxygen esterification with water removal",
+                "reagents_conditions": "Amberlyst-15 or H2SO4 (2 mol%), 2-MeTHF or EtOAc, 50–80 °C",
+                "solvent_tier": "CHEM21 Recommended (2-MeTHF / EtOAc)",
                 "scores": {"catalysis_atom": 24.0, "hazard_guide": 20.0, "mildness": 14.0, "selectivity": 11.0, "precedent": 9.0},
-                "source_ref": "ACS GCI Solvent Selection Guide; CHEM21 solvent guide; classic Fischer esterification precedent",
+                "source_ref": "ACS GCI & CHEM21 solvent guides",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "High",
-                "caveat": "Avoid with acid-sensitive protecting groups, tertiary/hindered alcohols, or acid-labile heterocycles.",
+                "caveat": "Check acid-labile groups and steric hindrance.",
             },
             {
-                "name": "Enzymatic / Lipase-Catalyzed Esterification or Transesterification",
+                "name": "Lipase-Catalyzed Esterification / Transesterification",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Acyl-enzyme intermediate formation with high chemo-, regio-, and enantioselectivity",
-                "reagents_conditions": "Immobilized Candida antarctica lipase B (Novozym 435), tert-butanol or 2-MeTHF, 30–50 °C",
-                "solvent_tier": "CHEM21 Recommended / Mild aqueous-organic or t-BuOH media",
+                "mechanism_role": "Enzymatic acyl transfer under mild conditions",
+                "reagents_conditions": "Immobilized Lipase B, t-BuOH or 2-MeTHF, 35–50 °C",
+                "solvent_tier": "CHEM21 Recommended / Mild bio-media",
                 "scores": {"catalysis_atom": 26.0, "hazard_guide": 22.0, "mildness": 18.0, "selectivity": 14.0, "precedent": 7.0},
-                "source_ref": "ACS GCI Biocatalysis & green esterification literature benchmarks",
+                "source_ref": "ACS GCI biocatalysis benchmarks",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "Medium",
-                "caveat": "Sensitive to substrate steric bulk, water activity, and enzyme cost/stability at larger scales.",
-            },
-            {
-                "name": "Boronic Acid-Catalyzed Direct Dehydrative Esterification",
-                "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Transient acyloxyboronate formation activating carboxylic acid toward alcohol",
-                "reagents_conditions": "Arylboronic acid (2–5 mol%), 4 Å molecular sieves, toluene or 2-MeTHF, 60–80 °C",
-                "solvent_tier": "CHEM21 Problematic (toluene) / Recommended (2-MeTHF swap)",
-                "scores": {"catalysis_atom": 22.0, "hazard_guide": 16.0, "mildness": 14.0, "selectivity": 11.0, "precedent": 6.0},
-                "source_ref": "Organoboron catalytic amidation/esterification literature & green metrics heuristics",
-                "evidence_level": "HEURISTIC",
-                "confidence": "Medium",
-                "caveat": "Requires moisture control (sieves) and experimental screening for sterically hindered substrates.",
+                "caveat": "Substrate scope and scale cost require check.",
             },
         ],
     },
     "amidation": {
         "mechanism_type": "Amidation",
-        "mechanism_rationale": (
-            "Avoids high-MW coupling reagents (e.g., HATU/HOBt) that generate stoichiometric "
-            "byproduct waste and hazardous aprotic dipolar solvents (DMF/DMAc), favoring "
-            "lower-waste activating agents or catalytic boron routes in greener media."
-        ),
+        "mechanism_rationale": "Lower-waste coupling (T3P) or catalytic boron/ester aminolysis in greener solvents instead of DMF/HATU.",
         "candidates": [
             {
-                "name": "Propylphosphonic Anhydride (T3P) Coupling in EtOAc or 2-MeTHF",
+                "name": "T3P Coupling in EtOAc or 2-MeTHF",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Cyclic anhydride activation of carboxylate yielding water-soluble phosphate byproducts",
-                "reagents_conditions": "T3P (50 wt% in EtOAc/2-MeTHF), base (e.g., NMM or DIPEA), 0–25 °C",
-                "solvent_tier": "ACS GCI Preferred / CHEM21 Recommended (EtOAc or 2-MeTHF vs. DMF/DCM)",
+                "mechanism_role": "Cyclic anhydride carboxylate activation with water-soluble byproduct",
+                "reagents_conditions": "T3P (50% in EtOAc/2-MeTHF), base, 0–25 °C",
+                "solvent_tier": "ACS GCI Preferred / CHEM21 Recommended",
                 "scores": {"catalysis_atom": 20.0, "hazard_guide": 20.0, "mildness": 17.0, "selectivity": 12.0, "precedent": 9.0},
-                "source_ref": "ACS GCI Pharmaceutical Roundtable reagent guide; T3P green amidation precedents",
+                "source_ref": "ACS GCI reagent guide",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "High",
-                "caveat": "Check epimerization risk on alpha-chiral carboxylic acids and manage exothermic addition.",
+                "caveat": "Monitor alpha-chiral centers for epimerization.",
             },
             {
-                "name": "Catalytic Boronic Acid / Borinic Acid Direct Amidation",
+                "name": "Boronic Acid Direct Amidation",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Boron-mediated carboxylate activation enabling direct condensation with amines",
-                "reagents_conditions": "2–10 mol% arylboronic/borinic catalyst, molecular sieves, 2-MeTHF or CPME, 50–80 °C",
-                "solvent_tier": "CHEM21 Recommended (2-MeTHF) / Problematic (CPME peroxide risk)",
+                "mechanism_role": "Catalytic boron activation of carboxylic acids",
+                "reagents_conditions": "2–5 mol% arylboronic acid, molecular sieves, 2-MeTHF, 60–80 °C",
+                "solvent_tier": "CHEM21 Recommended (2-MeTHF)",
                 "scores": {"catalysis_atom": 25.0, "hazard_guide": 18.0, "mildness": 14.0, "selectivity": 11.0, "precedent": 6.0},
-                "source_ref": "Catalytic direct amidation literature & green chemistry atom-economy principles",
+                "source_ref": "Catalytic direct amidation literature",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "Medium",
-                "caveat": "Less reactive with weakly nucleophilic anilines or bulky amines; needs substrate optimization.",
-            },
-            {
-                "name": "Amide Formation via Esters in Ethanol / Aqueous-Alcohol Media",
-                "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Direct aminolysis or catalytic/alkoxide-assisted acyl transfer from ester precursor",
-                "reagents_conditions": "Esters + amine in EtOH or i-PrOH, optional catalytic base/La(OTf)3 or TBD, 25–70 °C",
-                "solvent_tier": "CHEM21 Recommended (EtOH / i-PrOH; avoids DMF/NMP)",
-                "scores": {"catalysis_atom": 21.0, "hazard_guide": 21.0, "mildness": 15.0, "selectivity": 10.0, "precedent": 6.0},
-                "source_ref": "CHEM21 solvent guide & ester aminolysis heuristics",
-                "evidence_level": "HEURISTIC",
-                "confidence": "Medium",
-                "caveat": "Often slow for hindered substrates; verify no competing transesterification if mixed alcohols are used.",
+                "caveat": "Less suited for weakly nucleophilic anilines.",
             },
         ],
     },
     "oxidation": {
         "mechanism_type": "Oxidation",
-        "mechanism_rationale": (
-            "Replaces stoichiometric toxic heavy-metal oxidants (e.g., Cr(VI), MnO2) or "
-            "chlorinated solvents with catalytic aerobic or hypochlorite/peroxide pathways "
-            "matched to the target oxidation state."
-        ),
+        "mechanism_rationale": "Catalytic O2/TEMPO or NaOCl/TEMPO/H2O2 pathways replacing stoichiometric Cr(VI)/MnO2 and chlorinated solvents.",
         "candidates": [
             {
-                "name": "Catalytic Cu / TEMPO Aerobic Alcohol Oxidation",
+                "name": "Cu / TEMPO Aerobic Oxidation",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Cu(I)/TEMPO redox cycle using O2/air as terminal oxidant with water as sole byproduct",
-                "reagents_conditions": "1–5 mol% Cu salt, ligand (e.g., bpy/DMAP), 1–5 mol% TEMPO, air/O2, MeCN or 2-MeTHF, RT",
-                "solvent_tier": "CHEM21 Recommended (2-MeTHF) / Problematic (MeCN) + benign O2 oxidant",
+                "mechanism_role": "Catalytic aerobic alcohol oxidation with water byproduct",
+                "reagents_conditions": "1–5 mol% Cu/ligand + TEMPO, air/O2, 2-MeTHF or MeCN, RT",
+                "solvent_tier": "CHEM21 Recommended (2-MeTHF) + O2",
                 "scores": {"catalysis_atom": 28.0, "hazard_guide": 21.0, "mildness": 17.0, "selectivity": 12.0, "precedent": 9.0},
-                "source_ref": "ACS GCI oxidation principles; aerobic Cu/TEMPO literature precedents",
+                "source_ref": "ACS GCI aerobic oxidation precedent",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "High",
-                "caveat": "Check oxygen-solvent flammability limits in headspace and sulfur/amine catalyst poisoning.",
+                "caveat": "Check solvent flammability with O2/air.",
             },
             {
-                "name": "Catalytic TEMPO / NaOCl (Household Bleach) Oxidation",
+                "name": "TEMPO / NaOCl in EtOAc",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Oxoammonium cation generated catalytically from TEMPO oxidizes alcohol selectively",
-                "reagents_conditions": "0.5–2 mol% TEMPO, cat. KBr/NaHCO3, aq. NaOCl, EtOAc or i-PrOAc, 0–15 °C",
-                "solvent_tier": "CHEM21 Recommended (EtOAc / i-PrOAc) + aqueous phase",
+                "mechanism_role": "Oxoammonium-mediated selective oxidation",
+                "reagents_conditions": "1 mol% TEMPO, KBr/NaHCO3, aq. NaOCl, EtOAc, 0–15 °C",
+                "solvent_tier": "CHEM21 Recommended (EtOAc / H2O)",
                 "scores": {"catalysis_atom": 23.0, "hazard_guide": 18.0, "mildness": 17.0, "selectivity": 12.0, "precedent": 9.0},
-                "source_ref": "Anelli oxidation precedent; green solvent replacement of DCM with EtOAc",
+                "source_ref": "Anelli oxidation & green solvent swap",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "High",
-                "caveat": "Control pH (~8.5–9.5) and temperature to prevent over-oxidation to carboxylic acid or chlorination.",
-            },
-            {
-                "name": "Catalytic H2O2 Oxidation with Safe Polyoxometalate / Mn / Fe Catalyst",
-                "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Metal-peroxo/oxo oxygen atom transfer using hydrogen peroxide (water byproduct)",
-                "reagents_conditions": "0.5–3 mol% catalyst, 30% aq. H2O2, EtOH or t-BuOH, 20–60 °C",
-                "solvent_tier": "CHEM21 Recommended (EtOH / t-BuOH) + H2O2",
-                "scores": {"catalysis_atom": 25.0, "hazard_guide": 18.0, "mildness": 14.0, "selectivity": 9.0, "precedent": 6.0},
-                "source_ref": "Peroxide oxidation literature & green chemistry oxidant heuristics",
-                "evidence_level": "HEURISTIC",
-                "confidence": "Medium",
-                "caveat": "Peroxide decomposition/exotherm risk; screen catalyst selectivity on sensitive alkenes/heterocycles.",
+                "caveat": "Control pH and temperature to prevent over-oxidation.",
             },
         ],
     },
     "reduction": {
-        "mechanism_type": "Carbonyl / Nitro Reduction",
-        "mechanism_rationale": (
-            "Balances hydride delivery, catalytic hydrogenation, or catalytic transfer hydrogenation "
-            "against competing reducible groups (alkenes, aryl halides, nitriles, esters) while "
-            "avoiding pyrophoric hydrides (LiAlH4), stoichiometric heavy metals, or toxic chlorinated/dipolar solvents."
-        ),
+        "mechanism_type": "Reduction",
+        "mechanism_rationale": "Transfer hydrogenation, NaBH4 in alcohols, or mild iron reduction avoiding LiAlH4 and toxic aprotic solvents.",
         "candidates": [
             {
-                "name": "Catalytic Transfer Hydrogenation (CTH) in Alcohol Donor Media",
+                "name": "Catalytic Transfer Hydrogenation in EtOH / i-PrOH",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Metal-catalyzed hydrogen transfer from an alcohol/formate donor to C=O or -NO2 without pressurized H2 gas",
-                "reagents_conditions": "Pd/C, Ru, or Ir catalyst + HCOONH4 / HCOONa or i-PrOH, EtOH or 2-MeTHF, 40–80 °C",
-                "solvent_tier": "CHEM21 Recommended (EtOH, i-PrOH, 2-MeTHF) avoiding pressurized H2 cylinders",
+                "mechanism_role": "Hydrogen transfer from alcohol/formate donor without H2 cylinder",
+                "reagents_conditions": "Pd/C or Ru/Ir + formate/i-PrOH, EtOH or 2-MeTHF, 40–75 °C",
+                "solvent_tier": "CHEM21 Recommended (EtOH, i-PrOH, 2-MeTHF)",
                 "scores": {"catalysis_atom": 24.0, "hazard_guide": 21.0, "mildness": 16.0, "selectivity": 11.0, "precedent": 9.0},
-                "source_ref": "ACS GCI reduction/hydrogenation guidance; CHEM21 solvent guide; transfer hydrogenation literature",
+                "source_ref": "ACS GCI reduction & CHEM21 guide",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "High",
-                "caveat": "Check for competing dehalogenation on Ar-Br/Ar-I or alkene saturation; catalyst-free/chemo-tuned conditions may be needed.",
+                "caveat": "Watch for competing alkene or aryl halide reduction.",
             },
             {
-                "name": "NaBH4 Reduction in Protic Alcohol / Aqueous-Alcohol Medium",
+                "name": "NaBH4 in EtOH / Aqueous Alcohol",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Nucleophilic hydride transfer to polarized carbonyls (aldehydes/ketones) under mild conditions",
-                "reagents_conditions": "NaBH4 (0.3–1.0 equiv), MeOH or EtOH (or THF/H2O), 0–25 °C",
-                "solvent_tier": "CHEM21 Recommended (EtOH) / Problematic (MeOH) — safer than LiAlH4 in Et2O/THF",
+                "mechanism_role": "Mild carbonyl hydride reduction",
+                "reagents_conditions": "NaBH4, EtOH or EtOH/H2O, 0–25 °C",
+                "solvent_tier": "CHEM21 Recommended (EtOH / H2O)",
                 "scores": {"catalysis_atom": 18.0, "hazard_guide": 19.0, "mildness": 18.0, "selectivity": 12.0, "precedent": 9.0},
-                "source_ref": "Standard carbonyl reduction precedent; ACS GCI / CHEM21 solvent selection guides",
+                "source_ref": "Standard carbonyl reduction precedent",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "High",
-                "caveat": "Does not typically reduce esters, amides, or standard nitro groups directly; watch for exotherms/H2 evolution in protic media.",
-            },
-            {
-                "name": "Aqueous / Mild Iron-Mediated Nitro-to-Aniline Reduction",
-                "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Single-electron / proton-coupled reduction of nitroaromatics to anilines with reduced heavy-metal waste",
-                "reagents_conditions": "Fe powder or catalytic Fe/additive, aq. EtOH or aq. NH4Cl, 50–80 °C",
-                "solvent_tier": "CHEM21 Recommended (EtOH / H2O) replacing SnCl2 or high-pressure H2 where appropriate",
-                "scores": {"catalysis_atom": 20.0, "hazard_guide": 20.0, "mildness": 15.0, "selectivity": 11.0, "precedent": 8.0},
-                "source_ref": "Nitro reduction literature & green chemistry reagent alternatives",
-                "evidence_level": "LITERATURE-SUPPORTED",
-                "confidence": "Medium",
-                "caveat": "Iron sludge handling and chemoselectivity near reducible alkenes, ketones, or labile groups require bench verification.",
+                "caveat": "Does not reduce esters or amides directly.",
             },
         ],
     },
     "suzuki coupling": {
-        "mechanism_type": "C-C Cross-Coupling (Suzuki-Miyaura)",
-        "mechanism_rationale": (
-            "Preserves Pd-catalyzed oxidative addition / transmetalation / reductive elimination "
-            "while shifting away from hazardous dipolar aprotic solvents (DMF/DMAc/NMP) and "
-            "excessive Pd loadings toward aqueous-organic or greener ether/alcohol media."
-        ),
+        "mechanism_type": "Suzuki Coupling",
+        "mechanism_rationale": "Pd-catalyzed biaryl coupling in aqueous EtOH or 2-MeTHF instead of DMF/toluene.",
         "candidates": [
             {
-                "name": "Aqueous Ethanol / 2-MeTHF Suzuki-Miyaura with Low-Loading Pd",
+                "name": "Aqueous EtOH / 2-MeTHF Suzuki-Miyaura",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Pd(0)/Pd(II) catalytic cycle with organoboron transmetalation under mild base",
-                "reagents_conditions": "0.5–2 mol% Pd catalyst + ligand, K2CO3 or K3PO4, EtOH/H2O or 2-MeTHF/H2O, 50–80 °C",
-                "solvent_tier": "CHEM21 Recommended (EtOH, 2-MeTHF, H2O) replacing DMF/toluene",
+                "mechanism_role": "Low-loading Pd cross-coupling with arylboronic acids",
+                "reagents_conditions": "0.5–2 mol% Pd cat., K2CO3/K3PO4, EtOH/H2O or 2-MeTHF/H2O, 50–80 °C",
+                "solvent_tier": "CHEM21 Recommended (EtOH, 2-MeTHF, H2O)",
                 "scores": {"catalysis_atom": 24.0, "hazard_guide": 21.0, "mildness": 16.0, "selectivity": 12.0, "precedent": 9.0},
-                "source_ref": "ACS GCI Suzuki-Miyaura solvent guide; CHEM21 solvent selection guide",
+                "source_ref": "ACS GCI Suzuki solvent guide",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "High",
-                "caveat": "Aryl halides/boronic acids with low aqueous solubility may need cosolvent or phase-transfer tuning.",
+                "caveat": "Ensure adequate substrate solubility in aqueous-organic mix.",
             },
             {
-                "name": "Micellar / Surfactant-Enabled Aqueous Suzuki Coupling",
+                "name": "Micellar Aqueous Suzuki Coupling",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Pd catalysis inside surfactant nanomicelles in water, minimizing organic solvent volume",
-                "reagents_conditions": "1–2 mol% Pd catalyst/ligand, ~2 wt% aqueous surfactant (e.g., TPGS-750-M), base, RT–45 °C",
-                "solvent_tier": "Water-dominant medium (minimal organic cosolvent)",
+                "mechanism_role": "Surfactant-enabled coupling in water",
+                "reagents_conditions": "1–2 mol% Pd/ligand, ~2% aq. surfactant, base, RT–45 °C",
+                "solvent_tier": "Water-dominant medium",
                 "scores": {"catalysis_atom": 25.0, "hazard_guide": 22.0, "mildness": 16.0, "selectivity": 10.0, "precedent": 6.0},
-                "source_ref": "Lipshutz micellar catalysis literature & green cross-coupling heuristics",
+                "source_ref": "Lipshutz micellar catalysis literature",
                 "evidence_level": "HEURISTIC",
                 "confidence": "Medium",
-                "caveat": "Emulsion workup and surfactant compatibility should be tested for your specific substrate.",
-            },
-            {
-                "name": "Boronate Ester (Bpin) Swap to Curb Hydrolytic Protodeboronation",
-                "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Stabilizes boron species against premature cleavage during slow cross-coupling",
-                "reagents_conditions": "Ar-Bpin + Ar'-X, Pd catalyst, mild base, 2-MeTHF/H2O, 60–80 °C",
-                "solvent_tier": "CHEM21 Recommended (2-MeTHF) + aqueous base",
-                "scores": {"catalysis_atom": 20.0, "hazard_guide": 19.0, "mildness": 14.0, "selectivity": 12.0, "precedent": 7.0},
-                "source_ref": "Cross-coupling selectivity heuristics & boron reagent stability guidelines",
-                "evidence_level": "HEURISTIC",
-                "confidence": "Medium",
-                "caveat": "Bpin has lower atom economy than free boronic acid; use mainly when free acid protodeboronates fast.",
+                "caveat": "Verify emulsion workup and substrate compatibility.",
             },
         ],
     },
     "buchwald-hartwig": {
-        "mechanism_type": "C-N Cross-Coupling (Buchwald-Hartwig Amination)",
-        "mechanism_rationale": (
-            "Forms aryl/heteroaryl C–N bonds via Pd-catalyzed oxidative addition, amine coordination/deprotonation, "
-            "and reductive elimination while shifting away from hazardous dipolar aprotic solvents (DMF/NMP/dioxane) "
-            "and high catalyst loadings toward greener ethers or aqueous/micellar media."
-        ),
+        "mechanism_type": "Buchwald-Hartwig",
+        "mechanism_rationale": "Pd or Cu C–N coupling in 2-MeTHF or aqueous/micellar media replacing DMF/dioxane.",
         "candidates": [
             {
-                "name": "Low-Loading Pd/Ligand Coupling in 2-MeTHF or CPME",
+                "name": "Pd / Ligand C–N Coupling in 2-MeTHF",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Pd(0)/Pd(II) catalytic C–N bond formation using bulky/biaryl phosphine ligands and mild base",
-                "reagents_conditions": "0.5–2 mol% Pd source + ligand, Cs2CO3 or K3PO4 (or NaOtBu), 2-MeTHF or CPME, 60–90 °C",
-                "solvent_tier": "CHEM21 Recommended (2-MeTHF) / Problematic (CPME) — replaces dioxane/DMF",
+                "mechanism_role": "Catalytic aryl/heteroaryl C–N bond formation",
+                "reagents_conditions": "0.5–2 mol% Pd + ligand, K3PO4 or Cs2CO3, 2-MeTHF, 60–90 °C",
+                "solvent_tier": "CHEM21 Recommended (2-MeTHF)",
                 "scores": {"catalysis_atom": 23.0, "hazard_guide": 19.0, "mildness": 15.0, "selectivity": 12.0, "precedent": 9.0},
-                "source_ref": "ACS GCI / CHEM21 ether solvent guidance; Buchwald-Hartwig cross-coupling literature",
+                "source_ref": "Buchwald-Hartwig & CHEM21 ether guide",
                 "evidence_level": "LITERATURE-SUPPORTED",
                 "confidence": "High",
-                "caveat": "Strong alkoxide bases (e.g., NaOtBu) can cleave base-sensitive esters/nitriles or epimerize chiral centers; test K3PO4/Cs2CO3.",
+                "caveat": "Avoid harsh alkoxides if base-sensitive groups are present.",
             },
             {
-                "name": "Aqueous / Micellar Surfactant-Enabled Buchwald-Hartwig Coupling",
+                "name": "Cu-Mediated C–N Coupling in EtOH / 2-MeTHF",
                 "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Pd-catalyzed C–N coupling within aqueous surfactant nanoreactors with minimal organic cosolvent",
-                "reagents_conditions": "1–2 mol% Pd catalyst/ligand, aqueous surfactant (e.g., TPGS-750-M or water/t-BuOH), base, 25–60 °C",
-                "solvent_tier": "Water-dominant / low-organic medium reducing solvent waste and thermal load",
-                "scores": {"catalysis_atom": 25.0, "hazard_guide": 21.0, "mildness": 16.0, "selectivity": 10.0, "precedent": 6.0},
-                "source_ref": "Micellar aqueous Buchwald-Hartwig literature & green chemistry solvent reduction",
-                "evidence_level": "HEURISTIC",
-                "confidence": "Medium",
-                "caveat": "Substrate solubility in micellar phases, amine basicity/nucleophilicity, and catalyst/surfactant removal need experimental validation.",
-            },
-            {
-                "name": "Cu-Catalyzed Ullmann-Type C-N Coupling in Greener Solvent",
-                "origin": "OFFLINE_GREEN_SWAPS",
-                "mechanism_role": "Copper-mediated C–N bond formation offering a lower-cost metal alternative to palladium",
-                "reagents_conditions": "CuI or Cu2O (2–10 mol%), diamine/amino-acid ligand, K2CO3 or K3PO4, 2-MeTHF or EtOH/H2O, 70–100 °C",
-                "solvent_tier": "CHEM21 Recommended (2-MeTHF / EtOH) with lower-cost Cu catalyst vs. Pd",
+                "mechanism_role": "Lower-cost copper alternative for aryl C–N coupling",
+                "reagents_conditions": "2–10 mol% Cu salt + ligand, K2CO3/K3PO4, 2-MeTHF or EtOH, 70–100 °C",
+                "solvent_tier": "CHEM21 Recommended (2-MeTHF / EtOH)",
                 "scores": {"catalysis_atom": 20.0, "hazard_guide": 18.0, "mildness": 12.0, "selectivity": 10.0, "precedent": 7.0},
-                "source_ref": "Copper-catalyzed C–N coupling literature & green metal substitution heuristics",
+                "source_ref": "Copper C–N coupling literature",
                 "evidence_level": "HEURISTIC",
                 "confidence": "Low",
-                "caveat": "Often requires higher temperatures and higher Cu loading than Pd; aryl iodides/bromides react faster than aryl chlorides.",
+                "caveat": "Often requires higher temperature/loading than Pd.",
             },
         ],
-    },
-}
-
-KNOWN_DRUG_FALLBACKS: Dict[str, Dict[str, Any]] = {
-    "paracetamol": {
-        "cid": 1983,
-        "iupac_name": "N-(4-hydroxyphenyl)acetamide",
-        "molecular_weight": 151.163,
-        "xlogp": 0.46,
-        "smiles": "CC(=O)Nc1ccc(O)cc1",
-        "synonyms": ["paracetamol", "acetaminophen"],
-    },
-    "acetaminophen": {
-        "cid": 1983,
-        "iupac_name": "N-(4-hydroxyphenyl)acetamide",
-        "molecular_weight": 151.163,
-        "xlogp": 0.46,
-        "smiles": "CC(=O)Nc1ccc(O)cc1",
-        "synonyms": ["acetaminophen", "paracetamol"],
-    },
-    "ibuprofen": {
-        "cid": 3672,
-        "iupac_name": "2-[4-(2-methylpropyl)phenyl]propanoic acid",
-        "molecular_weight": 206.28,
-        "xlogp": 3.5,
-        "smiles": "CC(C)Cc1ccc(C(C)C(=O)O)cc1",
-        "synonyms": ["ibuprofen"],
-    },
-    "aspirin": {
-        "cid": 2244,
-        "iupac_name": "2-acetyloxybenzoic acid",
-        "molecular_weight": 180.16,
-        "xlogp": 1.2,
-        "smiles": "CC(=O)Oc1ccccc1C(=O)O",
-        "synonyms": ["aspirin", "acetylsalicylic acid"],
     },
 }
 
@@ -529,7 +373,6 @@ class GreenCandidate:
     evidence_level: str
     confidence: str
     caveat: str
-    hard_block: Optional[str] = None
 
     def __post_init__(self):
         self.scores = clamp_scores(self.scores)
@@ -540,8 +383,6 @@ class GreenCandidate:
 
     @property
     def priority_tier(self) -> str:
-        if self.hard_block:
-            return f"Blocked ({self.hard_block})"
         s = self.total_score
         if s >= 75.0 and self.evidence_level == "LITERATURE-SUPPORTED" and self.confidence in ("High", "Medium"):
             return "Priority 1"
@@ -549,24 +390,20 @@ class GreenCandidate:
             return "Priority 2"
         return "Priority 3"
 
-    @property
-    def badge(self) -> str:
-        return f"**[{self.evidence_level} | Confidence: {self.confidence}]**"
 
-
-def normalize_reaction_key(mech_or_step: str) -> Optional[str]:
-    text = (mech_or_step or "").lower()
-    if any(k in text for k in ["buchwald", "hartwig", "c-n coupling", "c–n coupling", "arylation", "aminat"]):
+def normalize_reaction_key(text: str) -> Optional[str]:
+    t = (text or "").lower()
+    if any(k in t for k in ["buchwald", "hartwig", "c-n", "aminat"]):
         return "buchwald-hartwig"
-    if any(k in text for k in ["reduct", "hydrogenat", "transfer hydrogenation", "nitro", "carbonyl"]):
+    if any(k in t for k in ["reduct", "hydrogenat", "nitro", "carbonyl"]):
         return "reduction"
-    if any(k in text for k in ["suzuki", "cross-coupling", "c-c coupling", "biaryl"]):
+    if any(k in t for k in ["suzuki", "cross-coupling", "c-c", "biaryl"]):
         return "suzuki coupling"
-    if any(k in text for k in ["esterif", "ester"]):
+    if any(k in t for k in ["esterif", "ester"]):
         return "esterification"
-    if any(k in text for k in ["amidat", "amide", "peptide coupling"]):
+    if any(k in t for k in ["amidat", "amide"]):
         return "amidation"
-    if any(k in text for k in ["oxidat", "oxidize", "dehydrogenat"]):
+    if any(k in t for k in ["oxidat", "oxidize"]):
         return "oxidation"
     return None
 
@@ -578,9 +415,7 @@ def get_rdkit_profile(mol) -> Dict[str, Any]:
         "carbonyl": "[CX3]=[OX1]",
         "nitro": "[NX3](=[OX1])[OX1-,OX2]",
         "alkene": "[CX3]=[CX3]",
-        "alkyne": "[CX2]#[CX1]",
         "aryl_halide": "[c][Cl,Br,I]",
-        "halide": "[c,C][F,Cl,Br,I]",
         "primary_oh": "[CH2X4][OX2H1]",
     }
     detected = [
@@ -589,6 +424,7 @@ def get_rdkit_profile(mol) -> Dict[str, Any]:
         if (pat := Chem.MolFromSmarts(smarts)) is not None and mol.HasSubstructMatch(pat)
     ]
     return {
+        "formula": rdMolDescriptors.CalcMolFormula(mol),
         "mol_wt": round(Descriptors.MolWt(mol), 2),
         "clogp": round(Descriptors.MolLogP(mol), 2),
         "tpsa": round(Descriptors.TPSA(mol), 2),
@@ -598,479 +434,315 @@ def get_rdkit_profile(mol) -> Dict[str, Any]:
     }
 
 
-def get_offline_green_steps(
-    molecule_name: str,
-    rdkit_profile: Dict[str, Any],
-    selected_reactions: Optional[List[str]] = None,
-) -> List[dict]:
-    keys_to_use: List[str] = []
-    if selected_reactions:
-        for r in selected_reactions:
+def get_offline_green_steps(mol_name: str, profile: Dict[str, Any], selected_rxns: Optional[List[str]] = None) -> List[dict]:
+    keys: List[str] = []
+    if selected_rxns:
+        for r in selected_rxns:
             k = normalize_reaction_key(r)
-            if k and k not in keys_to_use:
-                keys_to_use.append(k)
-
-    if not keys_to_use:
-        fgs = set(rdkit_profile.get("functional_groups", []))
+            if k and k not in keys:
+                keys.append(k)
+    if not keys:
+        fgs = set(profile.get("functional_groups", []))
         if "amide" in fgs:
-            keys_to_use.append("amidation")
+            keys.append("amidation")
         if "ester" in fgs:
-            keys_to_use.append("esterification")
+            keys.append("esterification")
         if "primary_oh" in fgs:
-            keys_to_use.append("oxidation")
+            keys.append("oxidation")
         if "nitro" in fgs or "carbonyl" in fgs:
-            keys_to_use.append("reduction")
-        if "halide" in fgs:
-            keys_to_use.append("suzuki coupling")
+            keys.append("reduction")
         if "aryl_halide" in fgs:
-            keys_to_use.append("buchwald-hartwig")
-        if not keys_to_use:
-            keys_to_use = ["amidation", "esterification", "oxidation", "reduction", "suzuki coupling", "buchwald-hartwig"]
+            keys.append("suzuki coupling")
+        if not keys:
+            keys = ["amidation", "esterification", "oxidation"]
 
     return [
         {
-            "step_name": f"Green Swap Evaluation — {OFFLINE_GREEN_SWAPS[k]['mechanism_type']} ({molecule_name})",
+            "step_name": f"{OFFLINE_GREEN_SWAPS[k]['mechanism_type']} Swap ({mol_name})",
             "mechanism_type": OFFLINE_GREEN_SWAPS[k]["mechanism_type"],
             "mechanism_rationale": OFFLINE_GREEN_SWAPS[k]["mechanism_rationale"],
             "green_candidates": OFFLINE_GREEN_SWAPS[k]["candidates"],
         }
-        for k in keys_to_use
+        for k in keys
     ]
 
 
-def blend_step_with_offline_swaps(step: dict, max_candidates: int = 5) -> dict:
+def blend_step_with_offline_swaps(step: dict) -> dict:
     raw_mech = step.get("mechanism_type", "")
     key = normalize_reaction_key(raw_mech)
-    offline_entry = OFFLINE_GREEN_SWAPS.get(key) if key else None
-
-    canonical_mech = (
-        offline_entry["mechanism_type"]
-        if offline_entry
-        else (raw_mech if raw_mech in CANONICAL_MECHANISMS else "General Transformation")
-    )
-
-    combined_rationale = str(step.get("mechanism_rationale", "")).strip()
-    if offline_entry and offline_entry["mechanism_rationale"] not in combined_rationale:
-        combined_rationale = (
-            f"{combined_rationale} | *Reference Mechanism Anchor:* {offline_entry['mechanism_rationale']}"
-            if combined_rationale
-            else offline_entry["mechanism_rationale"]
-        )
-
+    off = OFFLINE_GREEN_SWAPS.get(key) if key else None
     merged: List[dict] = []
-    seen_names = set()
+    seen = set()
 
-    def _add_cand(c_dict: dict, default_origin: str):
-        norm_name = re.sub(r"\s+", " ", str(c_dict.get("name", "")).strip().lower())
-        if not norm_name or norm_name in seen_names:
-            return
-        seen_names.add(norm_name)
-        item = dict(c_dict)
-        item["origin"] = item.get("origin") or default_origin
-        merged.append(item)
+    for c in step.get("green_candidates", []):
+        nm = re.sub(r"\s+", " ", str(c.get("name", "")).strip().lower())
+        if nm and nm not in seen:
+            seen.add(nm)
+            item = dict(c)
+            item["origin"] = item.get("origin") or "LLM"
+            merged.append(item)
 
-    for llm_c in step.get("green_candidates", []):
-        _add_cand(llm_c, "LLM")
-    if offline_entry:
-        for off_c in offline_entry.get("candidates", []):
-            _add_cand(off_c, "OFFLINE_GREEN_SWAPS")
+    if off:
+        for c in off.get("candidates", []):
+            nm = re.sub(r"\s+", " ", str(c.get("name", "")).strip().lower())
+            if nm and nm not in seen:
+                seen.add(nm)
+                item = dict(c)
+                item["origin"] = "OFFLINE_GREEN_SWAPS"
+                merged.append(item)
 
     return {
         **step,
-        "mechanism_type": canonical_mech,
-        "mechanism_rationale": combined_rationale,
-        "green_candidates": merged[:max_candidates],
+        "mechanism_type": off["mechanism_type"] if off else (raw_mech or "General Transformation"),
+        "mechanism_rationale": step.get("mechanism_rationale") or (off["mechanism_rationale"] if off else ""),
+        "green_candidates": merged[:4],
     }
 
 
-def score_and_format_green_steps(steps_data: List[dict], rdkit_profile: Dict[str, Any]) -> str:
-    out = [RUBRIC_MARKDOWN, "---"]
-    fg_set = set(rdkit_profile.get("functional_groups", []))
+def format_green_ranking(steps_data: List[dict], profile: Dict[str, Any]) -> str:
+    fg_set = set(profile.get("functional_groups", []))
+    lines = ["### 🌱 Ranked Green Chemistry Swaps (0–100 Rubric)"]
+    for idx, step in enumerate(steps_data, 1):
+        mech = step.get("mechanism_type", "General")
+        lines.append(f"\n#### {idx}. {step.get('step_name', mech)} (`{mech}`)")
+        if step.get("mechanism_rationale"):
+            lines.append(f"*{step['mechanism_rationale']}*")
 
-    for idx, step in enumerate(steps_data, start=1):
-        step_title = step.get("step_name", f"Step {idx}")
-        mech_type = step.get("mechanism_type", "General Transformation")
-        mech_notes = step.get("mechanism_rationale", "")
-
-        candidates: List[GreenCandidate] = []
-        for raw_c in step.get("green_candidates", []):
-            origin = raw_c.get("origin", "LLM")
-            scores = clamp_scores(raw_c.get("scores", {}))
-            caveat = raw_c.get("caveat", "Validate on actual substrate before scale-up.")
-            evidence = str(raw_c.get("evidence_level", "HEURISTIC")).upper()
-            if evidence not in ("LITERATURE-SUPPORTED", "HEURISTIC"):
-                evidence = "HEURISTIC"
-            confidence = str(raw_c.get("confidence", "Medium")).capitalize()
-            if confidence not in ("High", "Medium", "Low"):
-                confidence = "Medium"
-
-            cond_lower = str(raw_c.get("reagents_conditions", "")).lower()
-            if "reduct" in mech_type.lower() and "alkene" in fg_set and ("h2" in cond_lower or "hydrogen" in cond_lower):
-                scores["selectivity"] = max(0.0, scores["selectivity"] - 3.0)
-                caveat += " (RDKit alert: alkene motif detected; verify C=C vs. target chemoselectivity.)"
-
-            candidates.append(
+        cands: List[GreenCandidate] = []
+        for raw in step.get("green_candidates", []):
+            sc = clamp_scores(raw.get("scores"))
+            caveat = str(raw.get("caveat", "Validate on substrate."))
+            if "reduct" in mech.lower() and "alkene" in fg_set and "h2" in str(raw.get("reagents_conditions", "")).lower():
+                sc["selectivity"] = max(0.0, sc["selectivity"] - 3.0)
+                caveat += " (Alkene present: check chemoselectivity.)"
+            cands.append(
                 GreenCandidate(
-                    name=raw_c.get("name", "Alternative Protocol"),
-                    origin=origin,
-                    mechanism_role=raw_c.get("mechanism_role", mech_type),
-                    reagents_conditions=raw_c.get("reagents_conditions", "Specify conditions"),
-                    solvent_tier=raw_c.get("solvent_tier", "ACS GCI / CHEM21 check needed"),
-                    scores=scores,
-                    source_ref=raw_c.get("source_ref", "Green chemistry guide / reaction literature"),
-                    evidence_level=evidence,
-                    confidence=confidence,
+                    name=str(raw.get("name", "Alternative")),
+                    origin=str(raw.get("origin", "LLM")),
+                    mechanism_role=str(raw.get("mechanism_role", mech)),
+                    reagents_conditions=str(raw.get("reagents_conditions", "")),
+                    solvent_tier=str(raw.get("solvent_tier", "")),
+                    scores=sc,
+                    source_ref=str(raw.get("source_ref", "Green chemistry guide")),
+                    evidence_level=str(raw.get("evidence_level", "HEURISTIC")).upper(),
+                    confidence=str(raw.get("confidence", "Medium")).capitalize(),
                     caveat=caveat,
-                    hard_block=raw_c.get("hard_block"),
                 )
             )
-
-        candidates.sort(key=lambda c: (c.hard_block is not None, -c.total_score))
-
-        out.append(f"### Step {idx}: {step_title}")
-        out.append(f"- **Mechanism / Transformation Class:** `{mech_type}`")
-        if mech_notes:
-            out.append(f"- **Mechanistic & Catalyst Role:** {mech_notes}")
-
-        for c in candidates:
-            s = c.scores
-            breakdown = (
-                f"Cat/Atom: {s['catalysis_atom']}/30 | "
-                f"Hazard/Guide: {s['hazard_guide']}/25 | "
-                f"Mildness: {s['mildness']}/20 | "
-                f"Selectivity: {s['selectivity']}/15 | "
-                f"Precedent: {s['precedent']}/10"
+        cands.sort(key=lambda x: -x.total_score)
+        for c in cands:
+            lines.append(
+                f"- **{c.priority_tier} — {c.name}** (`{c.total_score}/100`) · `{c.origin}` · **[{c.evidence_level} | {c.confidence}]**\n"
+                f"  - *Conditions / Solvent:* {c.reagents_conditions} | *{c.solvent_tier}*\n"
+                f"  - *Ref & Caveat:* {c.source_ref} — {c.caveat}"
             )
-            out.append(
-                f"\n**{c.priority_tier} — {c.name}** (`{c.total_score}/100`) · *Source: `{c.origin}`* {c.badge}\n"
-                f"  - *Mechanism Role:* {c.mechanism_role}\n"
-                f"  - *Conditions & Solvent Tier:* {c.reagents_conditions} | *{c.solvent_tier}*\n"
-                f"  - *Score Breakdown:* {breakdown}\n"
-                f"  - *Reference / Rationale:* {c.source_ref}\n"
-                f"  - *Caveat:* {c.caveat}"
-            )
-        out.append("\n---")
-
-    return "\n".join(out)
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------------------------
-# 5. SOLUBILITY, CACHED CHEM-INFO & RETROSYNTHESIS HELPERS
+# 5. FAST ORGANIC MOLECULE LOOKUP (ANY MOLECULE: NAME, SMILES, OR CID)
 # ------------------------------------------------------------------------------
-def extract_compound_fields(c) -> Optional[Dict[str, Any]]:
-    if c is None:
+def resolve_rdkit_mol(query: str) -> Optional[Chem.Mol]:
+    """Accepts any valid SMILES directly, or resolves name/CID via PubChem."""
+    q = query.strip()
+    if not q:
         return None
-    smiles = (
-        getattr(c, "smiles", None)
-        or getattr(c, "isomeric_smiles", None)
-        or getattr(c, "connectivity_smiles", None)
-        or getattr(c, "canonical_smiles", None)
-    )
-    try:
-        mw_float = float(c.molecular_weight) if getattr(c, "molecular_weight", None) is not None else None
-    except (TypeError, ValueError):
-        mw_float = None
-    if not smiles or mw_float is None or mw_float <= 0:
-        return None
-    try:
-        xlogp_float = float(c.xlogp) if getattr(c, "xlogp", None) is not None else None
-    except (TypeError, ValueError):
-        xlogp_float = None
-    synonyms = getattr(c, "synonyms", None) or []
-    return {
-        "cid": getattr(c, "cid", None),
-        "iupac_name": getattr(c, "iupac_name", None),
-        "molecular_weight": mw_float,
-        "xlogp": xlogp_float,
-        "smiles": smiles,
-        "synonyms": list(synonyms[:10]),
-    }
 
+    # 1. Direct SMILES check (instant, works offline for any organic SMILES)
+    mol = Chem.MolFromSmiles(q)
+    if mol is not None and mol.GetNumAtoms() > 0:
+        return mol
 
-def is_drug(compound_data: Dict[str, Any]) -> bool:
-    non_drugs = {
-        "water", "methane", "benzene", "toluene", "hexane", "cyclohexane",
-        "sodium chloride", "table salt", "ethanol", "methanol", "acetone",
-    }
-    syns = [str(s).strip().lower() for s in (compound_data.get("synonyms") or [])[:5]]
-    if syns and syns[0] in non_drugs:
-        return False
-    return True
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_pubchem_lookup(mol_name: str) -> Dict[str, Any]:
-    cleaned = mol_name.strip()
-    key = cleaned.lower()
-
+    # 2. PubChem lookup by name or CID
     compounds = []
-    for attempt in range(2):
+    for _ in range(2):
         try:
-            compounds = pcp.get_compounds(cleaned, "name") or []
-            if not compounds and key != cleaned:
-                compounds = pcp.get_compounds(key, "name") or []
+            if q.isdigit():
+                compounds = [pcp.Compound.from_cid(int(q))]
+            else:
+                compounds = pcp.get_compounds(q, "name") or []
             if compounds:
                 break
         except Exception:
-            if attempt == 0:
-                time.sleep(0.8)
+            time.sleep(0.35)
 
-    for comp in compounds:
-        parsed = extract_compound_fields(comp)
-        if parsed is not None:
-            return {"status": "ok", "data": parsed, "source": "pubchem"}
-
-    if key in KNOWN_DRUG_FALLBACKS:
-        return {"status": "ok", "data": KNOWN_DRUG_FALLBACKS[key], "source": "fallback"}
-
-    return {"status": "not_found", "data": None, "source": "none"}
+    for c in compounds:
+        smi = (
+            getattr(c, "smiles", None)
+            or getattr(c, "isomeric_smiles", None)
+            or getattr(c, "connectivity_smiles", None)
+            or getattr(c, "canonical_smiles", None)
+        )
+        if smi:
+            m = Chem.MolFromSmiles(smi)
+            if m is not None and m.GetNumAtoms() > 0:
+                m.SetProp("_cid", str(getattr(c, "cid", "") or ""))
+                m.SetProp("_iupac", str(getattr(c, "iupac_name", "") or q))
+                if getattr(c, "xlogp", None) is not None:
+                    m.SetProp("_xlogp", str(c.xlogp))
+                return m
+    return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_sdf_data(cid: Optional[int]) -> Optional[str]:
+def cached_molecule_core(query: str) -> Optional[Dict[str, Any]]:
+    mol = resolve_rdkit_mol(query)
+    if mol is None:
+        return None
+    can_smiles = Chem.MolToSmiles(mol)
+    mw = round(Descriptors.MolWt(mol), 2)
+    clogp = round(Descriptors.MolLogP(mol), 2)
+    xlogp_prop = mol.GetProp("_xlogp") if mol.HasProp("_xlogp") else ""
+    try:
+        logp = float(xlogp_prop) if xlogp_prop else clogp
+    except ValueError:
+        logp = clogp
+
+    cid_prop = mol.GetProp("_cid") if mol.HasProp("_cid") else ""
+    iupac_prop = mol.GetProp("_iupac") if mol.HasProp("_iupac") else query.strip()
+    profile = get_rdkit_profile(mol)
+
+    return {
+        "query": query.strip(),
+        "name": iupac_prop or query.strip(),
+        "cid": int(cid_prop) if cid_prop.isdigit() else None,
+        "smiles": can_smiles,
+        "mol_wt": mw,
+        "logp": logp,
+        "profile": profile,
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_sdf(cid: Optional[int]) -> Optional[str]:
     if not cid:
         return None
-    for rec_type in ("3d", "2d"):
-        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF/?record_type={rec_type}"
+    for rec in ("3d", "2d"):
         try:
-            with urllib.request.urlopen(url, timeout=5) as response:
-                return response.read().decode("utf-8")
+            url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF/?record_type={rec}"
+            with urllib.request.urlopen(url, timeout=4) as r:
+                return r.read().decode("utf-8")
         except Exception:
             continue
     return None
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_wiki_summary(drug_name: str) -> str:
-    try:
-        return wikipedia.summary(drug_name, sentences=3, auto_suggest=False)
-    except DisambiguationError as e:
-        try:
-            return wikipedia.summary(e.options[0], sentences=3)
-        except Exception:
-            return "Multiple Wikipedia entries found for this query."
-    except PageError:
-        return "No detailed summary found on Wikipedia for this query."
-    except Exception:
-        return "Could not retrieve literature text from Wikipedia."
+def generate_solubility_curves(mw: float, logp: float):
+    conc = np.linspace(0, 100, 40)
+    s_conc = (1 - np.exp(-0.1 * conc)) * (50.0 / (abs(logp) + 1.5))
 
+    temps = np.linspace(273, 373, 40)
+    s_temp = np.exp(-((25000.0 + mw * 10.0) / 8.314) * (1.0 / temps - 1.0 / 298.15)) * (10.0 ** (-logp))
 
-def generate_solubility_curves(mol_weight: float, logp: float):
-    concentrations = np.linspace(0, 100, 50)
-    solubility_conc = (1 - np.exp(-0.1 * concentrations)) * (50.0 / (logp + 1.5))
+    press = np.linspace(1, 100, 40)
+    s_press = np.exp(((mw / 1.2) * (press - 1.0)) / (8.314 * 298.15)) * (10.0 ** (-logp))
 
-    temps = np.linspace(273, 373, 50)
-    enthalpy_sol = 25000.0 + (mol_weight * 10.0)
-    solubility_temp = np.exp(-(enthalpy_sol / 8.314) * (1.0 / temps - 1.0 / 298.15)) * (10.0 ** (-logp))
-
-    pressures = np.linspace(1, 100, 50)
-    molar_volume = mol_weight / 1.2
-    solubility_press = np.exp((molar_volume * (pressures - 1.0)) / (8.314 * 298.15)) * (10.0 ** (-logp))
-
-    ph_vals = np.linspace(2.0, 12.0, 100)
+    ph = np.linspace(2.0, 12.0, 60)
     s0 = max(1e-4, 0.05 * (10.0 ** (-0.5 * logp)))
-    pka_est = 4.5
-    solubility_ph = s0 * (1.0 + 10.0 ** (ph_vals - pka_est))
-
-    return concentrations, solubility_conc, temps, solubility_temp, pressures, solubility_press, ph_vals, solubility_ph
+    s_ph = s0 * (1.0 + 10.0 ** (ph - 4.5))
+    return conc, s_conc, temps, s_temp, press, s_press, ph, s_ph
 
 
-def get_aquatic_summary(drug_name: str, compound_data: Dict[str, Any]) -> str:
-    wiki_summary = cached_wiki_summary(drug_name)
-    iupac = compound_data.get("iupac_name") or drug_name
-    mw = compound_data.get("molecular_weight")
-    xlogp = compound_data.get("xlogp")
-
-    return (
-        f"### 💧 Aqueous Solubility & Aquatic Behaviour Summary\n\n"
-        f"**Chemical Identity:** `{iupac}` | **MW:** {mw} g/mol\n\n"
-        f"**Aquatic Behavior:** Estimated XLogP3 is **{xlogp if xlogp is not None else 'Unknown'}**, "
-        f"influencing aqueous solubility, ionization/pH partitioning, and environmental/biological transport.\n\n"
-        f"**Reference Summary:**\n> {wiki_summary}"
+# ------------------------------------------------------------------------------
+# 6. CONCISE RETROSYNTHESIS PROMPT + GUARANTEED PATHWAYS FALLBACK
+# ------------------------------------------------------------------------------
+def build_fallback_pathways(mol_name: str, smiles: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensures retrosynthetic pathways always render even offline or if LLM omits JSON."""
+    fgs = profile.get("functional_groups", [])
+    motif_hint = ", ".join(fgs) if fgs else "core carbon/heteroatom framework"
+    md = (
+        f"### 🛣️ Retrosynthetic Pathways for **{mol_name}** (`{smiles}`)\n"
+        f"*Detected motifs:* `{motif_hint}`\n\n"
+        f"- **Pathway A (Classical / Industrial):** Disconnect terminal amide/ester/C–heteroatom bond to commercial aromatic/aliphatic building blocks; execute standard acylation/substitution with solvent recovery.\n"
+        f"- **Pathway B (Green / Catalytic):** Use catalytic or milder reagents in 2-MeTHF, EtOAc, or aqueous/alcoholic media to lower E-factor and solvent hazard.\n"
+        f"- **Pathway C (Convergent / FGI):** Assemble two pre-functionalized fragments first, then apply late-stage functional group interconversion (FGI)."
     )
+    pathways = [
+        {"pathway_name": "Pathway A: Classical Route", "steps": [{"step": 1, "title": "Key Bond Disconnection", "target_smiles": smiles, "synthon_smiles": smiles}]},
+        {"pathway_name": "Pathway B: Green Catalytic Route", "steps": [{"step": 1, "title": "Green Solvent / Catalyst Swap", "target_smiles": smiles, "synthon_smiles": smiles}]},
+        {"pathway_name": "Pathway C: Convergent / FGI Route", "steps": [{"step": 1, "title": "Fragment Assembly & FGI", "target_smiles": smiles, "synthon_smiles": smiles}]},
+    ]
+    return {"markdown": md, "pathways": pathways, "green_steps": []}
 
 
-def generate_disconnection_gif(target_smiles: str, synthon_smiles: str, output_gif_path: str) -> Optional[str]:
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_concise_retrosynthesis(mol_name: str, smiles: str, profile_json: str, model_name: str) -> Dict[str, Any]:
+    profile = json.loads(profile_json)
+    if not os.environ.get("GOOGLE_API_KEY"):
+        return build_fallback_pathways(mol_name, smiles, profile)
+
+    llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.15)
+    prompt = PromptTemplate(
+        input_variables=["molecule", "smiles", "profile", "mechs"],
+        template=(
+            "You are a concise synthetic chemist. Target: {molecule} | SMILES: {smiles} | Profile: {profile}.\n"
+            "Write brief bullet points for:\n"
+            "1. Pathway A (Classical/Industrial disconnections & forward steps)\n"
+            "2. Pathway B (Green/mild disconnections & forward steps)\n"
+            "3. Pathway C (Convergent/FGI disconnections & forward steps)\n"
+            "4. Commercial starting materials\n"
+            "Then end with ONE ```json object with keys:\n"
+            "- \"pathways\": [{\"pathway_name\": str, \"steps\": [{\"step\": 1, \"title\": str, \"target_smiles\": str, \"synthon_smiles\": str}]}]\n"
+            "- \"green_steps\": [{\"step_name\": str, \"mechanism_type\": one of [{mechs}], \"mechanism_rationale\": str, "
+            "\"green_candidates\": [{\"name\": str, \"origin\": \"LLM\", \"mechanism_role\": str, \"reagents_conditions\": str, "
+            "\"solvent_tier\": str, \"scores\": {\"catalysis_atom\": 24, \"hazard_guide\": 20, \"mildness\": 16, \"selectivity\": 12, \"precedent\": 8}, "
+            "\"source_ref\": str, \"evidence_level\": \"LITERATURE-SUPPORTED\", \"confidence\": \"High\", \"caveat\": str}]}]\n"
+            "Keep text concise for fast response."
+        ),
+    )
+    raw = (prompt | llm | StrOutputParser()).invoke(
+        {
+            "molecule": mol_name,
+            "smiles": smiles,
+            "profile": json.dumps(profile),
+            "mechs": ", ".join(CANONICAL_MECHANISMS),
+        }
+    )
+    text = raw if isinstance(raw, str) else "\n".join(str(x) for x in raw)
+    pathways: List[dict] = []
+    green_steps: List[dict] = []
+
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        clean_md = text.replace(m.group(0), "").strip()
+        try:
+            obj = json.loads(m.group(1))
+            if isinstance(obj, dict):
+                pathways = obj.get("pathways") or []
+                green_steps = obj.get("green_steps") or []
+        except Exception:
+            pass
+    else:
+        clean_md = text.strip()
+
+    fallback = build_fallback_pathways(mol_name, smiles, profile)
+    if not clean_md:
+        clean_md = fallback["markdown"]
+    if not pathways:
+        pathways = fallback["pathways"]
+
+    return {"markdown": clean_md, "pathways": pathways, "green_steps": green_steps}
+
+
+def generate_disconnection_gif(target_smiles: str, synthon_smiles: str, out_path: str) -> Optional[str]:
     try:
-        target_mol = Chem.MolFromSmiles(target_smiles)
-        synthon_mol = Chem.MolFromSmiles(synthon_smiles)
-        if not target_mol or not synthon_mol:
+        m1 = Chem.MolFromSmiles(target_smiles)
+        m2 = Chem.MolFromSmiles(synthon_smiles)
+        if not m1 or not m2:
             return None
-
-        frames: List[Image.Image] = []
-        img_target = Draw.MolToImage(target_mol, size=(240, 240))
-        frames.extend([img_target] * 2)
-
-        img_highlight = Draw.MolToImage(
-            target_mol,
-            size=(240, 240),
-            highlightAtoms=list(range(target_mol.GetNumAtoms())),
-            highlightColor=(1, 0.4, 0.4),
-        )
-        frames.extend([img_highlight] * 2)
-
-        img_synthons = Draw.MolToImage(synthon_mol, size=(240, 240))
-        frames.extend([img_synthons] * 3)
-
-        frames[0].save(output_gif_path, save_all=True, append_images=frames[1:], duration=500, loop=0)
-        return output_gif_path
+        f1 = Draw.MolToImage(m1, size=(220, 220))
+        f2 = Draw.MolToImage(m2, size=(220, 220))
+        frames = [f1, f1, f2, f2]
+        frames[0].save(out_path, save_all=True, append_images=frames[1:], duration=450, loop=0)
+        return out_path
     except Exception:
         return None
 
 
-def extract_text_and_json(raw_response) -> tuple[str, dict]:
-    if isinstance(raw_response, list):
-        parts = [block["text"] if isinstance(block, dict) and "text" in block else str(block) for block in raw_response]
-        text_result = "\n".join(parts)
-    else:
-        text_result = str(raw_response)
-
-    parsed_json: dict = {"pathways": [], "green_steps": []}
-    json_match = re.search(r"```json\s*([\s\S]*?)\s*```", text_result)
-    if json_match:
-        raw_json = json_match.group(1).strip()
-        text_result = text_result.replace(json_match.group(0), "").strip()
-        try:
-            data = json.loads(raw_json)
-            if isinstance(data, list):
-                parsed_json["pathways"] = data
-            elif isinstance(data, dict):
-                parsed_json["pathways"] = data.get("pathways", [])
-                parsed_json["green_steps"] = data.get("green_steps", [])
-        except json.JSONDecodeError:
-            pass
-
-    return text_result, parsed_json
-
-
-def get_gemini_retrosynthesis(molecule_name: str, smiles: str, rdkit_profile: Dict[str, Any], model_name: str):
-    if not os.environ.get("GOOGLE_API_KEY"):
-        raise ValueError("GOOGLE_API_KEY is not configured.")
-
-    llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.2)
-
-    template = """
-    You are a synthetic organic chemist and green chemistry specialist. Analyze:
-    Name: {molecule}
-    SMILES: {smiles}
-    RDKit Descriptors & Motifs: {rdkit_profile}
-
-    Provide:
-    ## 1. Pathway A: Classical/Industrial Route (highest commercial feasibility)
-    ## 2. Pathway B: Alternative Green Chemistry Route (mild conditions / eco-friendly)
-    ## 3. Pathway C: Convergent/Novel FGI Route
-    ## 4. Synthetic Equivalents & Market Availability (cheapest / accessible commercial precursors)
-    ## 5. Comprehensive Feasibility Comparison Table
-    | Metric | Pathway A | Pathway B | Pathway C |
-    |---|---|---|---|
-    | Number of Synthetic Steps | ... | ... | ... |
-    | Commercial Availability of Starting Materials | ... | ... | ... |
-    | Atom Economy / Green Metrics | ... | ... | ... |
-    | Total Estimated Yield | ... | ... | ... |
-    | Overall Feasibility Score (Out of 10) | ... | ... | ... |
-    | Best Suited Application | ... | ... | ... |
-
-    At the VERY END, output a single ```json ... ``` object with:
-    - "pathways": list of 3 pathway objects with "pathway_name" and "steps" (each having "step", "title", "target_smiles", "synthon_smiles")
-    - "green_steps": list of 2-4 step objects, each with:
-      - "step_name": string
-      - "mechanism_type": one of [{canonical_list}]
-      - "mechanism_rationale": string
-      - "green_candidates": list of 2 objects with "name", "origin": "LLM", "mechanism_role", "reagents_conditions",
-        "solvent_tier", "scores": {{"catalysis_atom": 0-30, "hazard_guide": 0-25, "mildness": 0-20, "selectivity": 0-15, "precedent": 0-10}},
-        "source_ref", "evidence_level": "LITERATURE-SUPPORTED" | "HEURISTIC", "confidence": "High" | "Medium" | "Low", "caveat"
-    """
-
-    prompt = PromptTemplate(
-        input_variables=["molecule", "smiles", "rdkit_profile", "canonical_list"],
-        template=template,
-    )
-    chain = prompt | llm | StrOutputParser()
-    raw_result = chain.invoke(
-        {
-            "molecule": molecule_name,
-            "smiles": smiles,
-            "rdkit_profile": json.dumps(rdkit_profile),
-            "canonical_list": ", ".join(CANONICAL_MECHANISMS),
-        }
-    )
-    return extract_text_and_json(raw_result)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_gemini_synthesis(mol_name: str, smiles: str, profile_json: str, model_name: str):
-    return get_gemini_retrosynthesis(mol_name, smiles, json.loads(profile_json), model_name)
-
-
-def build_and_store_molecule_analysis(
-    mol_name: str,
-    model_name: str,
-    selected_rxns: Optional[List[str]],
-    include_wiki: bool,
-) -> Dict[str, Any]:
-    """Runs full analysis for a molecule and stores it in session_state for reuse."""
-    lookup = cached_pubchem_lookup(mol_name)
-    if lookup["status"] != "ok" or not lookup["data"]:
-        return {"error": "There is not enough data to show."}
-
-    comp_data = lookup["data"]
-    if not is_drug(comp_data):
-        return {"error": "The given molecule is not a drug."}
-
-    smiles = comp_data["smiles"]
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return {"error": "There is not enough data to show."}
-
-    profile = get_rdkit_profile(mol)
-    safe_logp = float(comp_data["xlogp"]) if comp_data.get("xlogp") is not None else 2.0
-    curves = generate_solubility_curves(float(comp_data["molecular_weight"]), safe_logp)
-    aquatic_md = get_aquatic_summary(mol_name, comp_data) if include_wiki else (
-        f"**Chemical Identity:** `{comp_data.get('iupac_name') or mol_name}` | "
-        f"**MW:** {comp_data['molecular_weight']} g/mol | **XLogP3:** {comp_data.get('xlogp', 'Unknown')}"
-    )
-
-    report_text = ""
-    parsed_json: dict = {"pathways": [], "green_steps": []}
-    if os.environ.get("GOOGLE_API_KEY"):
-        try:
-            report_text, parsed_json = cached_gemini_synthesis(
-                mol_name,
-                smiles,
-                json.dumps(profile),
-                model_name,
-            )
-        except Exception as e:
-            report_text = f"⚠️ Gemini synthesis fallback (`{e}`). Using built-in green chemistry rankings."
-
-    raw_green_steps = parsed_json.get("green_steps") or []
-    if raw_green_steps:
-        steps_to_score = [blend_step_with_offline_swaps(s) for s in raw_green_steps]
-    else:
-        steps_to_score = get_offline_green_steps(mol_name, profile, selected_reactions=selected_rxns)
-
-    green_md = score_and_format_green_steps(steps_to_score, profile)
-
-    record = {
-        "query": mol_name,
-        "source": lookup.get("source", "pubchem"),
-        "comp_data": comp_data,
-        "smiles": smiles,
-        "profile": profile,
-        "curves": curves,
-        "aquatic_md": aquatic_md,
-        "report_text": report_text,
-        "green_md": green_md,
-        "pathways": parsed_json.get("pathways") or [],
-    }
-    st.session_state["saved_molecules"][mol_name.strip().lower()] = record
-    return record
-
-
 # ------------------------------------------------------------------------------
-# 6. MAIN STREAMLIT DASHBOARD
+# 7. SIDEBAR & PROGRESSIVE STEP-BY-STEP EXECUTION
 # ------------------------------------------------------------------------------
-st.markdown("<h1 class='main-title'>🧪 AI Retrosynthetic & Aqueous Solubility Workbench</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='main-title'>🧪 AI Retrosynthetic & Solubility Workbench</h1>", unsafe_allow_html=True)
 
 try:
     if "GOOGLE_API_KEY" in st.secrets:
@@ -1079,193 +751,185 @@ except Exception:
     pass
 
 with st.sidebar:
-    st.write(f"👤 Logged in as: **{st.session_state['username']}**")
-    st.markdown(f"🛡️ **Role:** `{'Administrator' if st.session_state['username'] == ADMIN_USERNAME else 'Standard User'}`")
+    st.write(f"👤 User: **{st.session_state['username']}**")
     if st.button("🚪 Logout", key="btn_logout"):
         st.session_state["logged_in"] = False
         st.session_state["username"] = ""
+        st.session_state["last_record"] = None
         st.rerun()
 
     st.markdown("---")
-    st.header("⚙️ Gemini & Cache Controls")
     if not os.environ.get("GOOGLE_API_KEY"):
-        manual_key = st.text_input("Gemini API Key (if not in Secrets)", type="password", key="manual_gemini_key")
-        if manual_key.strip():
-            os.environ["GOOGLE_API_KEY"] = manual_key.strip()
+        k_in = st.text_input("Gemini API Key", type="password", key="sb_gemini_key")
+        if k_in.strip():
+            os.environ["GOOGLE_API_KEY"] = k_in.strip()
 
     selected_model = st.selectbox(
-        "Select Gemini Model",
-        ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"],
-        help="Gemini model used for multi-pathway retrosynthesis and green-swap evaluation.",
-        key="gemini_model_select",
+        "Gemini Model",
+        ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
+        key="sb_model_select",
     )
     mechanism_filter = st.selectbox(
-        "Green Swap Mechanism Filter",
+        "Green Swap Focus",
         ["Auto"] + CANONICAL_MECHANISMS,
-        key="green_swap_mechanism_filter",
+        key="sb_mech_filter",
     )
-    fast_mode = st.checkbox(
-        "⚡ Fast Mode (Skip GIFs & Wiki)",
-        value=True,
-        help="Skips slower Wikipedia lookups and multi-frame GIF rendering for rapid testing.",
-        key="fast_mode_checkbox",
-    )
+    run_gemini = st.checkbox("🤖 Run Gemini Pathways", value=True, key="sb_run_gemini")
+    render_gifs = st.checkbox("🎬 Render Step GIFs", value=False, key="sb_render_gifs")
 
-    if st.button("🧹 Clear Cache & Saved Data", key="btn_clear_cache"):
+    if st.button("🧹 Clear Cache & Saved", key="btn_clear_cache"):
         st.cache_data.clear()
         st.session_state["saved_molecules"] = {}
-        st.success("Cache and saved molecule session data cleared.")
+        st.session_state["last_record"] = None
         st.rerun()
 
     if st.session_state["saved_molecules"]:
         st.markdown("---")
-        st.subheader("💾 Saved Molecules")
-        saved_keys = list(st.session_state["saved_molecules"].keys())
-        picked_saved = st.selectbox(
-            "Load previously analyzed molecule",
-            options=[""] + saved_keys,
-            format_func=lambda k: "— Select saved molecule —" if k == "" else k.title(),
-            key="saved_mol_picker",
+        saved_list = list(st.session_state["saved_molecules"].keys())
+        chosen = st.selectbox(
+            "💾 Saved Molecules",
+            [""] + saved_list,
+            format_func=lambda x: "— Pick saved —" if x == "" else x,
+            key="sb_saved_picker",
         )
-        if picked_saved:
-            st.session_state["active_mol_query"] = st.session_state["saved_molecules"][picked_saved]["query"]
+        if chosen and chosen in st.session_state["saved_molecules"]:
+            st.session_state["last_record"] = st.session_state["saved_molecules"][chosen]
 
     if st.session_state["username"] == ADMIN_USERNAME:
-        st.markdown("---")
-        with st.expander("📊 Admin Panel: User Database"):
-            st.write("☁️ **Connected to Supabase Cloud**")
+        with st.expander("🛡️ Admin: Users"):
             try:
-                response = supabase.table("users").select("username, id").execute()
-                registered_users = response.data
-                if registered_users:
-                    st.success(f"Total Permanent Accounts: {len(registered_users)}")
-                    for idx, user in enumerate(registered_users, 1):
-                        st.text(f"{idx}. {user['username']} (ID: {user['id']})")
-                else:
-                    st.info("0 users are registered yet.")
-            except Exception as db_err:
-                st.error(f"Database error: {db_err}")
+                users = supabase.table("users").select("username, id").execute().data or []
+                for u_row in users:
+                    st.text(f"• {u_row['username']} (#{u_row['id']})")
+            except Exception as e:
+                st.error(f"DB error: {e}")
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    target_input = st.text_input(
-        "Enter Drug / Organic Molecule Name:",
+c_inp, c_btn = st.columns([3, 1])
+with c_inp:
+    query_val = st.text_input(
+        "Enter Any Organic Molecule Name or SMILES:",
         value=st.session_state["active_mol_query"],
-        placeholder="e.g., Ibuprofen, Aspirin, Paracetamol",
-        key="target_mol_input",
+        placeholder="e.g., Ibuprofen, salicylic acid, CC(=O)Nc1ccc(O)cc1, styrene",
+        key="main_mol_input",
     )
-with col2:
+with c_btn:
     st.write(" ")
     st.write(" ")
-    analyze_btn = st.button("🚀 Analyze & Save", key="btn_analyze_save")
+    go_btn = st.button("🚀 Run Step-by-Step", key="btn_run_steps")
 
-if analyze_btn:
-    mol_name = target_input.strip()
-    if not mol_name:
-        st.warning("Please enter a molecule name.")
+if go_btn:
+    q = query_val.strip()
+    if not q:
+        st.warning("Enter a molecule name or SMILES.")
         st.stop()
 
-    st.session_state["active_mol_query"] = mol_name
+    st.session_state["active_mol_query"] = q
+    progress = st.progress(0, text="Step 1/3: Resolving structure & RDKit properties...")
+
+    core = cached_molecule_core(q)
+    if not core:
+        progress.empty()
+        st.error("Could not resolve molecule from name or SMILES.")
+        st.stop()
+
+    progress.progress(35, text="Step 2/3: Ranking green chemistry swaps...")
     selected_rxns = None if mechanism_filter == "Auto" else [mechanism_filter]
+    base_steps = get_offline_green_steps(core["name"], core["profile"], selected_rxns)
 
-    with st.spinner(f"🔬 Analyzing and caching '{mol_name}'..."):
-        result = build_and_store_molecule_analysis(
-            mol_name=mol_name,
-            model_name=selected_model,
-            selected_rxns=selected_rxns,
-            include_wiki=not fast_mode,
-        )
+    progress.progress(70, text="Step 3/3: Building retrosynthetic pathways...")
+    if run_gemini and os.environ.get("GOOGLE_API_KEY"):
+        try:
+            retro = cached_concise_retrosynthesis(
+                core["name"],
+                core["smiles"],
+                json.dumps(core["profile"]),
+                selected_model,
+            )
+        except Exception as e:
+            fb = build_fallback_pathways(core["name"], core["smiles"], core["profile"])
+            retro = {"markdown": f"⚠️ LLM fallback (`{e}`)\n\n{fb['markdown']}", "pathways": fb["pathways"], "green_steps": []}
+    else:
+        retro = build_fallback_pathways(core["name"], core["smiles"], core["profile"])
 
-    if "error" in result:
-        st.error(result["error"])
-        st.stop()
+    blended_steps = [blend_step_with_offline_swaps(s) for s in (retro.get("green_steps") or base_steps)]
+    green_md = format_green_ranking(blended_steps, core["profile"])
+    curves = generate_solubility_curves(core["mol_wt"], core["logp"])
 
-    comp_data = result["comp_data"]
-    smiles = result["smiles"]
-    mol = Chem.MolFromSmiles(smiles)
-    profile = result["profile"]
-    c_x, c_y, t_x, t_y, p_x, p_y, ph_x, ph_y = result["curves"]
+    record = {
+        "core": core,
+        "curves": curves,
+        "green_md": green_md,
+        "retro_md": retro["markdown"],
+        "pathways": retro["pathways"],
+    }
+    st.session_state["saved_molecules"][q.lower()] = record
+    st.session_state["last_record"] = record
+    progress.progress(100, text="Done! Saved for instant reuse.")
+    time.sleep(0.2)
+    progress.empty()
 
-    st.success(f"Saved '{mol_name}' in session & cache (source: `{result['source']}`).")
-    st.subheader(f"Molecule Identified: {comp_data.get('iupac_name') or mol_name}")
-    st.code(f"SMILES: {smiles}")
-    st.markdown(
-        f"**RDKit Profile:** MW = `{profile['mol_wt']}` g/mol | cLogP = `{profile['clogp']}` | "
-        f"TPSA = `{profile['tpsa']}` Å² | Motifs = `{', '.join(profile['functional_groups']) or 'None flagged'}`"
+rec = st.session_state.get("last_record")
+if rec:
+    core = rec["core"]
+    prof = core["profile"]
+    mol = Chem.MolFromSmiles(core["smiles"])
+
+    # Stage 1 Output: Identity, Structure & Solubility
+    st.subheader(f"🔬 {core['name']} (`{prof['formula']}`)")
+    st.code(f"SMILES: {core['smiles']}")
+    st.caption(
+        f"MW: {core['mol_wt']} g/mol | Est. LogP: {core['logp']} | TPSA: {prof['tpsa']} Å² | "
+        f"Motifs: {', '.join(prof['functional_groups']) or 'None'}"
     )
 
-    c_2d, c_3d = st.columns(2)
-    with c_2d:
-        st.image(Draw.MolToImage(mol, size=(300, 300)), caption="2D Structure (RDKit)", width=260)
-    with c_3d:
-        if HAS_PY3DMOL:
-            sdf_data = cached_sdf_data(comp_data.get("cid"))
-            if sdf_data:
-                viewer = py3Dmol.view(width=420, height=280)
-                viewer.addModel(sdf_data, "sdf")
-                viewer.setStyle({"stick": {"radius": 0.15}, "sphere": {"scale": 0.28}})
-                viewer.setBackgroundColor("#0E1117")
-                viewer.zoomTo()
-                st_html(viewer._make_html(), height=290)
-            else:
-                st.info("3D conformer unavailable for this entry.")
-        else:
-            st.info("Install `py3Dmol` for an interactive 3D conformer viewer.")
+    s1, s2 = st.columns([1, 2])
+    with s1:
+        if mol:
+            st.image(Draw.MolToImage(mol, size=(240, 240)), caption="2D Structure", width=220)
+        if HAS_PY3DMOL and core.get("cid"):
+            sdf = cached_sdf(core["cid"])
+            if sdf:
+                v = py3Dmol.view(width=320, height=220)
+                v.addModel(sdf, "sdf")
+                v.setStyle({"stick": {"radius": 0.15}})
+                v.zoomTo()
+                st_html(v._make_html(), height=230)
 
-    st.markdown("---")
-    st.header("📈 Solubility & Thermodynamic Curves")
-    g1, g2 = st.columns(2)
-    with g1:
-        f1 = go.Figure(go.Scatter(x=c_x, y=c_y, mode="lines", line=dict(color="#00FFCC", width=3)))
-        f1.update_layout(title="Solubility vs Concentration", xaxis_title="Conc (mg/mL)", yaxis_title="Solubility (mg/mL)", template="plotly_dark", height=320)
-        st.plotly_chart(f1, use_container_width=True)
+    with s2:
+        conc, s_conc, temps, s_temp, press, s_press, ph, s_ph = rec["curves"]
+        g1, g2 = st.columns(2)
+        with g1:
+            f1 = go.Figure(go.Scatter(x=conc, y=s_conc, mode="lines", line=dict(color="#00FFCC", width=2.5)))
+            f1.update_layout(title="Solubility vs Conc", template="plotly_dark", height=230, margin=dict(l=25, r=15, t=35, b=25))
+            st.plotly_chart(f1, use_container_width=True)
 
-        f3 = go.Figure(go.Scatter(x=p_x, y=p_y, mode="lines", line=dict(color="#FFFF00", width=3)))
-        f3.update_layout(title="Solubility vs Pressure", xaxis_title="Pressure (atm)", yaxis_title="Solubility (mol/L)", template="plotly_dark", height=320)
-        st.plotly_chart(f3, use_container_width=True)
-    with g2:
-        f2 = go.Figure(go.Scatter(x=t_x, y=t_y, mode="lines", line=dict(color="#FF00CC", width=3)))
-        f2.update_layout(title="Solubility vs Temp (Van't Hoff)", xaxis_title="Temp (K)", yaxis_title="Solubility (mol/L)", template="plotly_dark", height=320)
-        st.plotly_chart(f2, use_container_width=True)
+            f3 = go.Figure(go.Scatter(x=press, y=s_press, mode="lines", line=dict(color="#FFFF00", width=2.5)))
+            f3.update_layout(title="Solubility vs Pressure", template="plotly_dark", height=230, margin=dict(l=25, r=15, t=35, b=25))
+            st.plotly_chart(f3, use_container_width=True)
+        with g2:
+            f2 = go.Figure(go.Scatter(x=temps, y=s_temp, mode="lines", line=dict(color="#FF00CC", width=2.5)))
+            f2.update_layout(title="Solubility vs Temp", template="plotly_dark", height=230, margin=dict(l=25, r=15, t=35, b=25))
+            st.plotly_chart(f2, use_container_width=True)
 
-        f4 = go.Figure(go.Scatter(x=ph_x, y=ph_y, mode="lines", line=dict(color="#33CCFF", width=3)))
-        f4.update_layout(title="Solubility vs pH (Henderson–Hasselbalch)", xaxis_title="pH", yaxis_title="Solubility (mol/L)", yaxis_type="log", template="plotly_dark", height=320)
-        st.plotly_chart(f4, use_container_width=True)
+            f4 = go.Figure(go.Scatter(x=ph, y=s_ph, mode="lines", line=dict(color="#33CCFF", width=2.5)))
+            f4.update_layout(title="Solubility vs pH", yaxis_type="log", template="plotly_dark", height=230, margin=dict(l=25, r=15, t=35, b=25))
+            st.plotly_chart(f4, use_container_width=True)
 
-    st.markdown(result["aquatic_md"])
+    # Stage 2 & Stage 3 Output in Tabs for clean step-by-step reading
+    tab_retro, tab_green = st.tabs(["🛣️ Retrosynthetic Pathways", "🌱 Green Swaps"])
+    with tab_retro:
+        st.markdown(rec["retro_md"])
+        if render_gifs and rec.get("pathways"):
+            for p_idx, p_obj in enumerate(rec["pathways"], 1):
+                st.markdown(f"**{p_obj.get('pathway_name', f'Pathway {p_idx}')}**")
+                for s_idx, stp in enumerate(p_obj.get("steps") or [], 1):
+                    gif = generate_disconnection_gif(
+                        stp.get("target_smiles", ""),
+                        stp.get("synthon_smiles", ""),
+                        f"gif_p{p_idx}_s{s_idx}.gif",
+                    )
+                    if gif:
+                        st.image(gif, caption=stp.get("title", f"Step {s_idx}"), width=180)
 
-    st.markdown("---")
-    st.header("🧬 Multi-Pathway Retrosynthesis & Green Swap Ranking")
-    if result["report_text"]:
-        st.markdown(result["report_text"])
-    st.markdown(result["green_md"])
-
-    if not fast_mode and result["pathways"]:
-        st.header("🎬 Animated Disconnection Simulations")
-        for path_idx, pathway in enumerate(result["pathways"], 1):
-            st.subheader(f"📌 {pathway.get('pathway_name', f'Pathway {path_idx}')}")
-            steps = pathway.get("steps", [])
-            if steps:
-                cols = st.columns(len(steps))
-                for idx, step_info in enumerate(steps):
-                    with cols[idx % len(cols)]:
-                        st.write(f"**Step {step_info.get('step', idx + 1)}:** {step_info.get('title', '')}")
-                        t_smi = step_info.get("target_smiles", "")
-                        s_smi = step_info.get("synthon_smiles", "")
-                        if t_smi and s_smi:
-                            gif_path = f"temp_path{path_idx}_step{idx}.gif"
-                            out_gif = generate_disconnection_gif(t_smi, s_smi, gif_path)
-                            if out_gif:
-                                st.image(out_gif)
-
-    full_export = "\n\n".join(
-        part for part in [result["aquatic_md"], result["report_text"], result["green_md"]] if part
-    )
-    safe_name = "".join([c for c in mol_name if c.isalnum() or c == " "]).strip().replace(" ", "_")
-    st.download_button(
-        label="📥 Download Full Report (.md)",
-        data=full_export,
-        file_name=f"{safe_name}_Solubility_and_Green_Retrosynthesis.md",
-        mime="text/markdown",
-        key="btn_download_report",
-    )
+    with tab_green:
+        st.markdown(rec["green_md"])
