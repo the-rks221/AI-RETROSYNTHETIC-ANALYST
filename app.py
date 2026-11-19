@@ -971,6 +971,7 @@ with st.sidebar:
     mechanism_filter = st.selectbox(
         "Green Swap Mechanism Filter",
         ["Auto"] + CANONICAL_MECHANISMS,
+        key="green_swap_mechanism_filter",
     )
 
     if st.session_state["username"] == ADMIN_USERNAME:
