@@ -886,7 +886,7 @@ def generate_disconnection_gif_bytes(target_smiles: str, synthon_smiles: str) ->
 # ------------------------------------------------------------------------------
 # 7. SIDEBAR & PROGRESSIVE STEP-BY-STEP EXECUTION
 # ------------------------------------------------------------------------------
-st.markdown("<h1 class='main-title'>🧪 AI Retrosynthetic & Solubility Workbench</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='main-title'>🧪 AI Retrosynthetic Analyst</h1>", unsafe_allow_html=True)
 
 try:
     if "GOOGLE_API_KEY" in st.secrets:
