@@ -1089,3 +1089,24 @@ if rec:
                         )
                     else:
                         st.caption(f"Could not render GIF for {title}.")
+    with tab_green:
+        selected_rxns = None if mechanism_filter == "Auto" else [mechanism_filter]
+        raw_llm_steps = rec.get("raw_green_steps") or []
+
+        if selected_rxns:
+            # Filter LLM steps to selected mechanism, or build from OFFLINE_GREEN_SWAPS
+            matched = [
+                blend_step_with_offline_swaps(s)
+                for s in raw_llm_steps
+                if normalize_reaction_key(str(s.get("mechanism_type", "")))
+                in [normalize_reaction_key(r) for r in selected_rxns]
+            ]
+            steps_to_show = matched or get_offline_green_steps(core["name"], prof, selected_rxns)
+        else:
+            base = raw_llm_steps or get_offline_green_steps(core["name"], prof, None)
+            steps_to_show = [blend_step_with_offline_swaps(s) for s in base]
+
+        if not steps_to_show:
+            steps_to_show = get_offline_green_steps(core["name"], prof, ["Amidation", "Esterification"])
+
+        st.markdown(format_green_ranking(steps_to_show, prof))
