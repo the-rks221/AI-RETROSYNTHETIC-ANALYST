@@ -748,17 +748,40 @@ def cached_concise_retrosynthesis(mol_name: str, smiles: str, profile_json: str,
     }
 
 
-def generate_disconnection_gif(target_smiles: str, synthon_smiles: str, out_path: str) -> Optional[str]:
+import io
+
+
+def generate_disconnection_gif_bytes(target_smiles: str, synthon_smiles: str) -> Optional[bytes]:
     try:
-        m1 = Chem.MolFromSmiles(target_smiles)
-        m2 = Chem.MolFromSmiles(synthon_smiles)
-        if not m1 or not m2:
+        m1 = Chem.MolFromSmiles(target_smiles or "")
+        if m1 is None or m1.GetNumAtoms() == 0:
             return None
-        f1 = Draw.MolToImage(m1, size=(220, 220))
-        f2 = Draw.MolToImage(m2, size=(220, 220))
-        frames = [f1, f1, f2, f2]
-        frames[0].save(out_path, save_all=True, append_images=frames[1:], duration=450, loop=0)
-        return out_path
+
+        # Use synthon_smiles if valid; otherwise fall back to a second view of target_mol
+        m2 = Chem.MolFromSmiles(synthon_smiles or "")
+        img1 = Draw.MolToImage(m1, size=(240, 240)).convert("RGB")
+        if m2 is not None and m2.GetNumAtoms() > 0:
+            img2 = Draw.MolToImage(m2, size=(240, 240)).convert("RGB")
+        else:
+            highlight_atoms = list(range(min(4, m1.GetNumAtoms())))
+            img2 = Draw.MolToImage(
+                m1,
+                size=(240, 240),
+                highlightAtoms=highlight_atoms,
+            ).convert("RGB")
+
+        buf = io.BytesIO()
+        frames = [img1, img1, img2, img2]
+        frames[0].save(
+            buf,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=500,
+            loop=0,
+        )
+        buf.seek(0)
+        return buf.getvalue()
     except Exception:
         return None
 
@@ -943,17 +966,23 @@ if rec:
     tab_retro, tab_green = st.tabs(["🛣️ Retrosynthetic Pathways", "🌱 Green Swaps"])
     with tab_retro:
         st.markdown(rec["retro_md"])
-        if render_gifs and rec.get("pathways"):
-            for p_idx, p_obj in enumerate(rec["pathways"], 1):
+        if render_gifs:
+            pathways = rec.get("pathways") or []
+            if not pathways:
+                st.info("No pathway steps available to render GIFs.")
+            for p_idx, p_obj in enumerate(pathways, 1):
                 st.markdown(f"**{p_obj.get('pathway_name', f'Pathway {p_idx}')}**")
-                for s_idx, stp in enumerate(p_obj.get("steps") or [], 1):
-                    gif = generate_disconnection_gif(
+                steps = p_obj.get("steps") or []
+                for s_idx, stp in enumerate(steps, 1):
+                    gif_bytes = generate_disconnection_gif_bytes(
                         stp.get("target_smiles", ""),
                         stp.get("synthon_smiles", ""),
-                        f"gif_p{p_idx}_s{s_idx}.gif",
                     )
-                    if gif:
-                        st.image(gif, caption=stp.get("title", f"Step {s_idx}"), width=180)
-
-    with tab_green:
-        st.markdown(rec["green_md"])
+                    if gif_bytes:
+                        st.image(
+                            gif_bytes,
+                            caption=stp.get("title", f"Step {s_idx}"),
+                            width=200,
+                        )
+                    else:
+                        st.caption(f"Could not render GIF for Step {s_idx} (invalid SMILES).")
