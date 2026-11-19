@@ -753,47 +753,118 @@ import io
 from PIL import ImageDraw
 
 
+def _select_disconnection_bond(mol: Chem.Mol) -> Optional[int]:
+    """Chooses a clean bond to disconnect: prefers acyclic C-N/C-O/C-C single bonds."""
+    if mol is None or mol.GetNumBonds() == 0:
+        return None
+
+    # 1. Look for acyclic single bonds (best for clean 2-fragment disconnection)
+    acyclic_single = []
+    for bond in mol.GetBonds():
+        if not bond.IsInRing() and bond.GetBondType() == Chem.BondType.SINGLE:
+            a1, a2 = bond.GetBeginAtom(), bond.GetEndAtom()
+            # Prefer heteroatom-carbon bond (e.g., amide C-N or ester/ether C-O)
+            is_het_c = (
+                (a1.GetAtomicNum() != 6 and a2.GetAtomicNum() == 6)
+                or (a2.GetAtomicNum() != 6 and a1.GetAtomicNum() == 6)
+            )
+            acyclic_single.append((0 if is_het_c else 1, bond.GetIdx()))
+
+    if acyclic_single:
+        acyclic_single.sort(key=lambda x: x[0])
+        return acyclic_single[0][1]
+
+    # 2. Fallback to any non-ring bond, then bond 0
+    for bond in mol.GetBonds():
+        if not bond.IsInRing():
+            return bond.GetIdx()
+    return 0
+
+
+def _draw_two_synthons_side_by_side(frags: List[Chem.Mol], label: str) -> Image.Image:
+    """Renders up to two synthon fragments side-by-side on a single 240x240 frame."""
+    canvas = Image.new("RGB", (240, 240), (255, 255, 255))
+    if not frags:
+        return canvas
+
+    if len(frags) == 1:
+        single = Draw.MolToImage(frags[0], size=(220, 200)).convert("RGB")
+        canvas.paste(single, (10, 28))
+    else:
+        left_img = Draw.MolToImage(frags[0], size=(114, 175)).convert("RGB")
+        right_img = Draw.MolToImage(frags[1], size=(114, 175)).convert("RGB")
+        canvas.paste(left_img, (4, 34))
+        canvas.paste(right_img, (122, 34))
+
+        # Draw a "+" separator between Synthon 1 and Synthon 2
+        draw_mid = ImageDraw.Draw(canvas)
+        draw_mid.text((116, 115), "+", fill=(200, 30, 30))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle([4, 4, 236, 26], fill=(20, 24, 33))
+    draw.text((10, 10), label[:34], fill=(0, 255, 204))
+    return canvas
+
+
 def generate_disconnection_gif_bytes(target_smiles: str, synthon_smiles: str) -> Optional[bytes]:
     try:
         m1 = Chem.MolFromSmiles(target_smiles or "")
         if m1 is None or m1.GetNumAtoms() == 0:
             return None
 
-        # Pick a secondary molecule: use synthon_smiles if different & valid, else a fragment/substructure
-        m2 = Chem.MolFromSmiles(synthon_smiles or "")
-        s1_can = Chem.MolToSmiles(m1)
-        s2_can = Chem.MolToSmiles(m2) if (m2 is not None and m2.GetNumAtoms() > 0) else ""
+        bond_idx = _select_disconnection_bond(m1)
+        highlight_bonds = [bond_idx] if bond_idx is not None else []
+        highlight_atoms: List[int] = []
+        atom_colors: Dict[int, tuple] = {}
+        bond_colors: Dict[int, tuple] = {}
 
-        if not s2_can or s2_can == s1_can:
-            # Split at a non-ring single bond if available to show a disconnected fragment
-            cut_bonds = [
-                b.GetIdx()
-                for b in m1.GetBonds()
-                if not b.IsInRing() and b.GetBondType() == Chem.BondType.SINGLE
-            ]
-            if cut_bonds:
-                frag_mol = Chem.FragmentOnBonds(m1, [cut_bonds[0]], addDummies=False)
-                frags = Chem.GetMolFrags(frag_mol, asMols=True, sanitizeFrags=True)
-                m2 = max(frags, key=lambda x: x.GetNumAtoms()) if frags else m1
+        if bond_idx is not None:
+            bond = m1.GetBondWithIdx(bond_idx)
+            u, v = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            highlight_atoms = [u, v]
+            atom_colors = {u: (1.0, 0.25, 0.25), v: (1.0, 0.25, 0.25)}
+            bond_colors = {bond_idx: (1.0, 0.15, 0.15)}
+
+        # Generate two synthons/fragments from the disconnected bond (or use provided synthon_smiles)
+        synthons: List[Chem.Mol] = []
+        if bond_idx is not None:
+            cut_mol = Chem.FragmentOnBonds(m1, [bond_idx], addDummies=False)
+            frags = list(Chem.GetMolFrags(cut_mol, asMols=True, sanitizeFrags=True))
+            frags.sort(key=lambda x: x.GetNumAtoms(), reverse=True)
+            synthons = frags[:2]
+
+        if len(synthons) < 2 and synthon_smiles:
+            for part in synthon_smiles.split("."):
+                pm = Chem.MolFromSmiles(part.strip())
+                if pm is not None and pm.GetNumAtoms() > 0:
+                    synthons.append(pm)
+                if len(synthons) == 2:
+                    break
+
+        if not synthons:
+            synthons = [m1]
+
+        def _make_target_frame(label: str, highlight: bool) -> Image.Image:
+            if highlight:
+                img = Draw.MolToImage(
+                    m1,
+                    size=(240, 240),
+                    highlightAtoms=highlight_atoms,
+                    highlightBonds=highlight_bonds,
+                    highlightAtomColors=atom_colors,
+                    highlightBondColors=bond_colors,
+                ).convert("RGB")
             else:
-                m2 = m1
+                img = Draw.MolToImage(m1, size=(240, 240)).convert("RGB")
 
-        highlight_ids = list(range(min(3, m1.GetNumAtoms())))
-
-        def _make_frame(mol_obj, label: str, highlight: Optional[List[int]] = None) -> Image.Image:
-            img = Draw.MolToImage(
-                mol_obj,
-                size=(240, 240),
-                highlightAtoms=highlight or [],
-            ).convert("RGB")
             draw = ImageDraw.Draw(img)
             draw.rectangle([4, 4, 236, 26], fill=(20, 24, 33))
             draw.text((10, 10), label, fill=(0, 255, 204))
             return img
 
-        f1 = _make_frame(m1, "1. Target Molecule")
-        f2 = _make_frame(m1, "2. Disconnection Site", highlight=highlight_ids)
-        f3 = _make_frame(m2, "3. Synthon / Fragment")
+        f1 = _make_target_frame("1. Target Molecule", highlight=False)
+        f2 = _make_target_frame("2. Cut Bond Highlighted", highlight=True)
+        f3 = _draw_two_synthons_side_by_side(synthons, f"3. {len(synthons)} Synthons Generated")
 
         buf = io.BytesIO()
         frames = [f1, f1, f2, f2, f3, f3]
@@ -802,7 +873,7 @@ def generate_disconnection_gif_bytes(target_smiles: str, synthon_smiles: str) ->
             format="GIF",
             save_all=True,
             append_images=frames[1:],
-            duration=550,
+            duration=600,
             loop=0,
             disposal=2,
         )
