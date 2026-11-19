@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import base64
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -1003,11 +1004,17 @@ if rec:
                         stp.get("target_smiles", ""),
                         stp.get("synthon_smiles", ""),
                     )
+                    title = stp.get("title", f"Step {s_idx}")
                     if gif_bytes:
-                        st.image(
-                            gif_bytes,
-                            caption=stp.get("title", f"Step {s_idx}"),
-                            width=200,
+                        b64_gif = base64.b64encode(gif_bytes).decode("utf-8")
+                        st.markdown(
+                            f"""
+                            <div style="margin-bottom:12px;">
+                              <img src="data:image/gif;base64,{b64_gif}" width="220" style="border-radius:8px;border:1px solid #333;" alt="{title}" />
+                              <div style="font-size:0.85rem;color:#aaa;margin-top:4px;">{title}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
                         )
                     else:
-                        st.caption(f"Could not render GIF for Step {s_idx} (invalid SMILES).")
+                        st.caption(f"Could not render GIF for {title}.")
