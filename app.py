@@ -716,6 +716,51 @@ def score_and_format_green_steps(steps_data: List[dict], rdkit_profile: Dict[str
 # ------------------------------------------------------------------------------
 # 5. SOLUBILITY, CHEM-INFO & RETROSYNTHESIS HELPERS
 # ------------------------------------------------------------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_pubchem_lookup(mol_name: str) -> Optional[Dict[str, Any]]:
+    compounds = pcp.get_compounds(mol_name.strip().lower(), "name")
+    if not compounds:
+        return None
+    c = compounds[0]
+    return {
+        "cid": c.cid,
+        "iupac_name": c.iupac_name,
+        "molecular_weight": c.molecular_weight,
+        "xlogp": c.xlogp,
+        "isomeric_smiles": c.isomeric_smiles,
+        "canonical_smiles": c.canonical_smiles,
+        "synonyms": c.synonyms[:5] if c.synonyms else [],
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_sdf_data(cid: int) -> Optional[str]:
+    for rec_type in ("3d", "2d"):
+        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/record/SDF/?record_type={rec_type}"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                return resp.read().decode("utf-8")
+        except Exception:
+            continue
+    return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_wiki_summary(drug_name: str) -> str:
+    try:
+        return wikipedia.summary(drug_name, sentences=3, auto_suggest=False)
+    except DisambiguationError as e:
+        try:
+            return wikipedia.summary(e.options[0], sentences=3)
+        except Exception:
+            return "Multiple entries found on Wikipedia."
+    except Exception:
+        return "Summary unavailable."
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_gemini_synthesis(mol_name: str, smiles: str, profile_json: str, model_name: str):
+    return get_gemini_retrosynthesis(mol_name, smiles, json.loads(profile_json), model_name)
 def is_drug(molecule_data) -> bool:
     non_drugs = {"water", "methane", "benzene", "salt", "sodium chloride", "ethanol"}
     if molecule_data.synonyms and any(nd in molecule_data.synonyms[0].lower() for nd in non_drugs):
@@ -895,6 +940,15 @@ except Exception:
     pass
 
 with st.sidebar:
+    mechanism_filter = st.selectbox(
+        "Green Swap Mechanism Filter",
+        ["Auto"] + CANONICAL_MECHANISMS,
+    )
+    fast_mode = st.checkbox(
+        "⚡ Fast Mode (Skip GIFs)",
+        value=True,
+        help="Skips multi-frame GIF rendering for faster responses.",
+    )
     st.write(f"👤 Logged in as: **{st.session_state['username']}**")
     st.markdown(f"🛡️ **Role:** `{'Administrator' if st.session_state['username'] == ADMIN_USERNAME else 'Standard User'}`")
     if st.button("🚪 Logout"):
@@ -955,7 +1009,8 @@ if analyze_btn:
 
     with st.spinner(f"🔍 Searching PubChem for '{mol_name}'..."):
         try:
-            compounds = pcp.get_compounds(mol_name, "name")
+            compounds = cached_pubchem_lookup(mol_name)
+            cached_gemini_synthesis(mol_name, smiles, json.dumps(profile), selected_model)
         except Exception:
             st.error("There is not enough data to show.")
             st.stop()
@@ -1056,8 +1111,9 @@ if analyze_btn:
     st.markdown(score_and_format_green_steps(steps_to_score, profile))
 
     # Disconnection GIFs if returned by Gemini
-    pathways = parsed_json.get("pathways") or []
-    if pathways:
+    if not fast_mode:
+     pathways = parsed_json.get("pathways") or []
+     if pathways:
         st.header("🎬 Animated Disconnection Simulations")
         for path_idx, pathway in enumerate(pathways, 1):
             st.subheader(f"📌 {pathway.get('pathway_name', f'Pathway {path_idx}')}")
