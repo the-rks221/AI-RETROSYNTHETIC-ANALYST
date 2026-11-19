@@ -682,11 +682,11 @@ def cached_concise_retrosynthesis(mol_name: str, smiles: str, profile_json: str,
             "3. Pathway C (Convergent/FGI disconnections & forward steps)\n"
             "4. Commercial starting materials\n"
             "Then end with ONE ```json object with keys:\n"
-            "- \"pathways\": [{\"pathway_name\": str, \"steps\": [{\"step\": 1, \"title\": str, \"target_smiles\": str, \"synthon_smiles\": str}]}]\n"
-            "- \"green_steps\": [{\"step_name\": str, \"mechanism_type\": one of [{mechs}], \"mechanism_rationale\": str, "
-            "\"green_candidates\": [{\"name\": str, \"origin\": \"LLM\", \"mechanism_role\": str, \"reagents_conditions\": str, "
-            "\"solvent_tier\": str, \"scores\": {\"catalysis_atom\": 24, \"hazard_guide\": 20, \"mildness\": 16, \"selectivity\": 12, \"precedent\": 8}, "
-            "\"source_ref\": str, \"evidence_level\": \"LITERATURE-SUPPORTED\", \"confidence\": \"High\", \"caveat\": str}]}]\n"
+            "- \"pathways\": [{{\"pathway_name\": \"str\", \"steps\": [{{\"step\": 1, \"title\": \"str\", \"target_smiles\": \"str\", \"synthon_smiles\": \"str\"}}]}}]\n"
+            "- \"green_steps\": [{{\"step_name\": \"str\", \"mechanism_type\": \"one of [{mechs}]\", \"mechanism_rationale\": \"str\", "
+            "\"green_candidates\": [{{\"name\": \"str\", \"origin\": \"LLM\", \"mechanism_role\": \"str\", \"reagents_conditions\": \"str\", "
+            "\"solvent_tier\": \"str\", \"scores\": {{\"catalysis_atom\": 24, \"hazard_guide\": 20, \"mildness\": 16, \"selectivity\": 12, \"precedent\": 8}}, "
+            "\"source_ref\": \"str\", \"evidence_level\": \"LITERATURE-SUPPORTED\", \"confidence\": \"High\", \"caveat\": \"str\"}}]}}]\n"
             "Keep text concise for fast response."
         ),
     )
