@@ -1,8 +1,11 @@
 streamlit
-rdkit
 pubchempy
-langchain-google-genai
-langchain-core
-imageio
+plotly
+numpy
+wikipedia
+rdkit
+py3Dmol
 pillow
 supabase
+langchain-core
+langchain-google-genai
