@@ -34,7 +34,7 @@ except ImportError:
 ADMIN_USERNAME = "admin"
 
 st.set_page_config(
-    page_title="AI Retrosynthetic & Solubility Workbench",
+    page_title="AI Retrosynthetic Analyst",
     page_icon="🧪",
     layout="wide",
     initial_sidebar_state="expanded",
